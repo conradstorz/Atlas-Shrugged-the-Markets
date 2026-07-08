@@ -1,0 +1,83 @@
+# --- Secrets / credentials (never commit) ---
+.env
+.env.*
+!.env.example
+!.env.template
+
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.der
+*.jks
+*.keystore
+
+secrets/
+secret/
+.secrets/
+credentials/
+
+*.secrets.*
+*.credentials.*
+
+# Cloud / CLI credential defaults
+.aws/
+.azure/
+.gcp/
+
+# --- PII / sensitive local artifacts ---
+# Local databases and analytical artifacts often contain private records.
+*.db
+*.sqlite
+*.sqlite3
+*.parquet
+*.feather
+*.h5
+*.hdf5
+
+# Runtime outputs and generated reports
+.atlas/
+reports/**
+!reports/.gitkeep
+
+# --- Logs / dumps ---
+*.log
+*.out
+*.err
+*.pid
+*.stackdump
+*.trace
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.python-version
+
+.venv/
+venv/
+env/
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.nox/
+.tox/
+
+.coverage
+.coverage.*
+htmlcov/
+
+build/
+dist/
+*.egg-info/
+
+# --- Tooling / editor / OS noise ---
+.vscode/
+.idea/
+
+.DS_Store
+Thumbs.db
