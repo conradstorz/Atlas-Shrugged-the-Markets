@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 from atlas.analytics.overlap import top_repeated_holdings
-from atlas.portfolio.analysis import portfolio_hidden_concentration, summarize_portfolio
+from atlas.portfolio.analysis import combined_concentration, summarize_portfolio
 from atlas.scoring.engine import score_all
 
 
@@ -62,21 +62,28 @@ def build_research_report(conn: sqlite3.Connection, portfolio_name: str | None =
             "",
             f"- Positions: {summary.position_count}",
             f"- Total value: {_money(summary.total_value)}",
-            f"- ETF value: {_money(summary.etf_value)}",
-            f"- Cash or unknown value: {_money(summary.cash_or_unknown_value)}",
+            f"- Equity value: {_money(summary.equity_value)}",
+            f"- Fund value (ETF + mutual): {_money(summary.fund_value)}",
+            f"- Cash value: {_money(summary.cash_value)}",
             "",
-            "### Estimated Hidden Concentration",
+            "### Combined Concentration",
             "",
-            "The current prototype treats each parsed top-ten holding as equal weight inside its ETF top-ten list. This is directional only until full holdings data is added.",
+            "Per-name exposure combining directly-held positions with equal-weight "
+            "ETF/fund look-through. Direct dollars are exact; look-through is a "
+            "prototype estimate from parsed top-ten holdings.",
             "",
-            "| Holding | Estimated Portfolio % | Appears In | Source ETFs |",
-            "|---|---:|---:|---|",
+            "| Symbol | Exposure % | Exposure | Direct | Look-through | Source Funds |",
+            "|---|---:|---:|---:|---:|---|",
         ])
-        for row in portfolio_hidden_concentration(conn, portfolio_name, limit=25):
+        report_data = combined_concentration(conn, portfolio_name, limit=25)
+        for line in report_data.lines:
             lines.append(
-                f"| {row['holding_symbol']} | {row['estimated_portfolio_percent']:.2f}% | "
-                f"{row['appears_in_positions']} | {row['source_etfs']} |"
+                f"| {line.symbol} | {line.exposure_percent:.2f}% | {_money(line.exposure_value)} | "
+                f"{_money(line.direct_value)} | {_money(line.lookthrough_value)} | "
+                f"{', '.join(line.source_funds) or '-'} |"
             )
+        lines.append("")
+        lines.append(f"Fund value not looked through: {_money(report_data.unmodeled_fund_value)}.")
 
     lines.extend([
         "",

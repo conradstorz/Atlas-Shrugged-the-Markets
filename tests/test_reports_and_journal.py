@@ -37,4 +37,5 @@ def test_report_can_include_private_portfolio(tmp_path: Path) -> None:
     load_portfolio_csv(conn, "Primary", Path("examples/sample_portfolio.csv"))
     report = build_research_report(conn, portfolio_name="Primary")
     assert "## Portfolio: Primary" in report
-    assert "Estimated Hidden Concentration" in report
+    assert "Combined Concentration" in report
+    assert "not looked through" in report

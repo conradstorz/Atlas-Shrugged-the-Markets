@@ -9,8 +9,9 @@ class PortfolioSummary:
     name: str
     position_count: int
     total_value: float
-    etf_value: float
-    cash_or_unknown_value: float
+    equity_value: float
+    fund_value: float
+    cash_value: float
 
 
 def summarize_portfolio(conn: sqlite3.Connection, portfolio_name: str) -> PortfolioSummary:
@@ -22,8 +23,9 @@ def summarize_portfolio(conn: sqlite3.Connection, portfolio_name: str) -> Portfo
         SELECT
             COUNT(*) AS position_count,
             COALESCE(SUM(market_value), 0) AS total_value,
-            COALESCE(SUM(CASE WHEN asset_type = 'ETF' THEN market_value ELSE 0 END), 0) AS etf_value,
-            COALESCE(SUM(CASE WHEN asset_type <> 'ETF' THEN market_value ELSE 0 END), 0) AS cash_or_unknown_value
+            COALESCE(SUM(CASE WHEN asset_type = 'equity' THEN market_value ELSE 0 END), 0) AS equity_value,
+            COALESCE(SUM(CASE WHEN asset_type IN ('etf', 'mutual_fund') THEN market_value ELSE 0 END), 0) AS fund_value,
+            COALESCE(SUM(CASE WHEN asset_type = 'cash' THEN market_value ELSE 0 END), 0) AS cash_value
         FROM portfolio_position
         WHERE portfolio_id = ?
         """,
@@ -33,8 +35,9 @@ def summarize_portfolio(conn: sqlite3.Connection, portfolio_name: str) -> Portfo
         name=portfolio["name"],
         position_count=int(row["position_count"]),
         total_value=float(row["total_value"]),
-        etf_value=float(row["etf_value"]),
-        cash_or_unknown_value=float(row["cash_or_unknown_value"]),
+        equity_value=float(row["equity_value"]),
+        fund_value=float(row["fund_value"]),
+        cash_value=float(row["cash_value"]),
     )
 
 
@@ -77,3 +80,100 @@ def portfolio_hidden_concentration(conn: sqlite3.Connection, portfolio_name: str
         """,
         {"portfolio_id": portfolio["id"], "limit": limit},
     ).fetchall()
+
+
+@dataclass(frozen=True)
+class ConcentrationLine:
+    symbol: str
+    exposure_value: float
+    exposure_percent: float
+    direct_value: float
+    lookthrough_value: float
+    source_funds: list[str]
+
+
+@dataclass(frozen=True)
+class ConcentrationReport:
+    lines: list[ConcentrationLine]
+    total_value: float
+    unmodeled_fund_value: float
+
+
+def combined_concentration(
+    conn: sqlite3.Connection, portfolio_name: str, limit: int = 25
+) -> ConcentrationReport:
+    """Estimate per-name exposure combining direct holdings and fund look-through.
+
+    Direct ``equity`` positions contribute their full market value. ``etf`` and
+    ``mutual_fund`` positions with parsed top-ten holdings distribute their value
+    equally across those holdings (equal-weight prototype). Fund value with no
+    parsed holdings is reported as ``unmodeled_fund_value``.
+    """
+    portfolio = conn.execute(
+        "SELECT id FROM portfolio WHERE name = ?", (portfolio_name,)
+    ).fetchone()
+    if portfolio is None:
+        raise ValueError(f"Portfolio not found: {portfolio_name}")
+    portfolio_id = portfolio["id"]
+
+    total_value = float(
+        conn.execute(
+            "SELECT COALESCE(SUM(market_value), 0) AS total FROM portfolio_position WHERE portfolio_id = ?",
+            (portfolio_id,),
+        ).fetchone()["total"]
+    )
+    if total_value <= 0:
+        return ConcentrationReport(lines=[], total_value=0.0, unmodeled_fund_value=0.0)
+
+    direct: dict[str, float] = {}
+    lookthrough: dict[str, float] = {}
+    sources: dict[str, set[str]] = {}
+
+    for row in conn.execute(
+        "SELECT symbol, market_value FROM portfolio_position "
+        "WHERE portfolio_id = ? AND asset_type = 'equity'",
+        (portfolio_id,),
+    ):
+        direct[row["symbol"]] = direct.get(row["symbol"], 0.0) + float(row["market_value"])
+
+    unmodeled_fund_value = 0.0
+    funds = conn.execute(
+        "SELECT symbol, market_value FROM portfolio_position "
+        "WHERE portfolio_id = ? AND asset_type IN ('etf', 'mutual_fund')",
+        (portfolio_id,),
+    ).fetchall()
+    for fund in funds:
+        holdings = conn.execute(
+            "SELECT holding_symbol FROM etf_holding WHERE etf_symbol = ?",
+            (fund["symbol"],),
+        ).fetchall()
+        if not holdings:
+            unmodeled_fund_value += float(fund["market_value"])
+            continue
+        share = float(fund["market_value"]) / len(holdings)
+        for holding in holdings:
+            symbol = holding["holding_symbol"]
+            lookthrough[symbol] = lookthrough.get(symbol, 0.0) + share
+            sources.setdefault(symbol, set()).add(fund["symbol"])
+
+    lines: list[ConcentrationLine] = []
+    for symbol in set(direct) | set(lookthrough):
+        direct_value = direct.get(symbol, 0.0)
+        lookthrough_value = lookthrough.get(symbol, 0.0)
+        exposure = direct_value + lookthrough_value
+        lines.append(
+            ConcentrationLine(
+                symbol=symbol,
+                exposure_value=round(exposure, 2),
+                exposure_percent=round(exposure / total_value * 100, 2),
+                direct_value=round(direct_value, 2),
+                lookthrough_value=round(lookthrough_value, 2),
+                source_funds=sorted(sources.get(symbol, set())),
+            )
+        )
+    lines.sort(key=lambda line: (-line.exposure_percent, line.symbol))
+    return ConcentrationReport(
+        lines=lines[:limit],
+        total_value=round(total_value, 2),
+        unmodeled_fund_value=round(unmodeled_fund_value, 2),
+    )
