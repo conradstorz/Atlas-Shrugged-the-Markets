@@ -201,8 +201,11 @@ If instead `FUND` has no parsed holdings: NVDA = `$100` (`50%`, direct only),
 - `Positions Total` and preamble rows -> skipped.
 - Warrants / dead tickers (`$0.00`, tiny values) -> stored as `equity`
   positions with their value (no special filtering; data is not editorialized).
-- Duplicate symbol within a file -> last wins (UNIQUE(portfolio_id, symbol)); in
-  practice Schwab lists each symbol once.
+- Same symbol across multiple account sections of one file -> market value is
+  summed (accumulated on `UNIQUE(portfolio_id, symbol)` conflict), so an
+  "All Accounts" export gives combined household exposure. Within a single
+  account Schwab lists each symbol once. The returned count is the number of
+  distinct stored positions.
 - Fund present in portfolio but absent from `etf_holding` -> contributes to
   `unmodeled_fund_value`, not to look-through exposure.
 
