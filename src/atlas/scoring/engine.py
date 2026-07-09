@@ -19,11 +19,40 @@ def _parse_percent(value: str | None) -> float | None:
     return float(match.group()) if match else None
 
 
-def score_etf(row: sqlite3.Row) -> ScoreBreakdown:
-    """Generate the first transparent heuristic score for an ETF.
+def _universe_holding_frequency(conn: sqlite3.Connection) -> dict[str, int]:
+    """Map each holding to the number of ETFs whose top-ten contains it."""
+    rows = conn.execute(
+        """
+        SELECT holding_symbol, COUNT(DISTINCT etf_symbol) AS df
+        FROM etf_holding
+        GROUP BY holding_symbol
+        """
+    ).fetchall()
+    return {row["holding_symbol"]: row["df"] for row in rows}
 
-    This v0.2 scorer is deliberately simple. It exists to make the workflow real,
-    not to pretend we have completed the final investment model.
+
+def measured_diversification(holdings: list[str], freq: dict[str, int]) -> int | None:
+    """Score 0-10 for how much unique exposure an ETF's holdings add.
+
+    A holding held by only this ETF (document frequency <= 1) is "unique"; one
+    also held by other ETFs is "crowded". The score is the fraction of unique
+    holdings, so an ETF that just piles into the same widely-held names scores
+    low. Returns ``None`` when there are no parsed holdings to measure.
+    """
+    if not holdings:
+        return None
+    unique = sum(1 for holding in holdings if freq.get(holding, 0) <= 1)
+    return round(unique / len(holdings) * 10)
+
+
+def score_etf(row: sqlite3.Row, diversification_override: int | None = None) -> ScoreBreakdown:
+    """Generate a transparent, partly data-grounded score for an ETF.
+
+    Cost comes from the real expense ratio, resilience is eroded by the real
+    information-technology exposure, and diversification is measured from actual
+    top-ten holdings overlap (passed in via ``diversification_override``). The AI
+    signal is still a keyword heuristic; valuation and drawdown data are not yet
+    connected. Kept deliberately explainable rather than final.
     """
     symbol = row["symbol"]
     text = f"{row['description']} {row['category']}".lower()
@@ -61,13 +90,23 @@ def score_etf(row: sqlite3.Row) -> ScoreBreakdown:
         resilience_score = 3 if ai_score >= 8 else 5
         diversification_score = 3
 
+    # AI signal is nudged up by real information-technology concentration.
     if tech is not None:
         if tech >= 40:
             ai_score = max(ai_score, 8)
-            resilience_score = min(resilience_score, 4)
-            diversification_score = min(diversification_score, 4)
         elif tech >= 20:
             ai_score = max(ai_score, 7)
+
+    # Resilience erodes with real IT concentration: every 10 percentage points
+    # of technology exposure above 20% costs one point of resilience.
+    if tech is not None and tech > 20:
+        resilience_score = max(1, resilience_score - round((tech - 20) / 10))
+
+    # Diversification is the MEASURED uniqueness of this ETF's holdings versus
+    # the rest of the universe. When we have no parsed holdings to measure
+    # (e.g. bond funds), keep the role-based default.
+    if diversification_override is not None:
+        diversification_score = diversification_override
 
     if expense is None:
         cost_score = 6
@@ -91,11 +130,17 @@ def score_etf(row: sqlite3.Row) -> ScoreBreakdown:
     )
     overall = max(0, min(100, overall))
 
+    diversification_basis = (
+        "measured from top-ten holdings overlap"
+        if diversification_override is not None
+        else "role-based default (no parsed holdings)"
+    )
     explanation = (
         f"Role={role}; AI={ai_score}/10; resilience={resilience_score}/10; "
-        f"diversification={diversification_score}/10; cost={cost_score}/10. "
-        "This is a v0.2 heuristic score and should be refined with holdings, "
-        "overlap, valuation, and historical drawdown data."
+        f"diversification={diversification_score}/10 ({diversification_basis}); "
+        f"cost={cost_score}/10. Cost uses the real expense ratio and resilience "
+        "reflects real information-technology concentration; AI remains heuristic "
+        "and valuation/drawdown data are not yet connected."
     )
     return ScoreBreakdown(
         symbol=symbol,
@@ -109,9 +154,50 @@ def score_etf(row: sqlite3.Row) -> ScoreBreakdown:
     )
 
 
+def read_scores(conn: sqlite3.Connection) -> list[ScoreBreakdown]:
+    """Return previously persisted ETF scores without recomputing them.
+
+    Reads the ``etf_score`` table (populated by :func:`score_all`) so read-only
+    callers such as the web dashboard don't have to re-score and re-write on
+    every request.
+    """
+    rows = conn.execute(
+        """
+        SELECT symbol, role, overall_score, ai_score, resilience_score,
+               cost_score, diversification_score, explanation
+        FROM etf_score
+        ORDER BY overall_score DESC, symbol
+        """
+    ).fetchall()
+    return [
+        ScoreBreakdown(
+            symbol=row["symbol"],
+            role=row["role"],
+            overall_score=row["overall_score"],
+            ai_score=row["ai_score"],
+            resilience_score=row["resilience_score"],
+            cost_score=row["cost_score"],
+            diversification_score=row["diversification_score"],
+            explanation=row["explanation"],
+        )
+        for row in rows
+    ]
+
+
 def score_all(conn: sqlite3.Connection) -> list[ScoreBreakdown]:
+    freq = _universe_holding_frequency(conn)
     rows = conn.execute("SELECT * FROM etf ORDER BY symbol").fetchall()
-    scores = [score_etf(row) for row in rows]
+    scores = []
+    for row in rows:
+        holdings = [
+            holding["holding_symbol"]
+            for holding in conn.execute(
+                "SELECT holding_symbol FROM etf_holding WHERE etf_symbol = ? ORDER BY rank",
+                (row["symbol"],),
+            ).fetchall()
+        ]
+        override = measured_diversification(holdings, freq)
+        scores.append(score_etf(row, diversification_override=override))
     for score in scores:
         conn.execute(
             """

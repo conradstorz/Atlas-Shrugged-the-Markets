@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from html import escape
 from pathlib import Path
 
@@ -11,7 +12,7 @@ from atlas.application.kernel import ATLAS_VERSION, AtlasKernel
 from atlas.plugins.hello import HelloAtlasPlugin
 from atlas.db.database import connect, load_seed_universe
 from atlas.reports.markdown import build_research_report
-from atlas.scoring.engine import score_all
+from atlas.scoring.engine import read_scores, score_all
 
 DEFAULT_DB = Path(".atlas/atlas.db")
 DEFAULT_SEED = Path("data/atlas_seed_universe.csv")
@@ -51,11 +52,32 @@ def version() -> dict[str, str]:
     return {"version": ATLAS_VERSION}
 
 
-def _conn(db: Path = DEFAULT_DB, seed: Path = DEFAULT_SEED):
-    conn = connect(db)
-    if seed.exists():
-        load_seed_universe(conn, seed)
-    return conn
+_initialized = False
+
+
+def _ensure_initialized() -> None:
+    """Load the seed universe and score the ETFs once for the app's lifetime.
+
+    Previously every request reloaded the seed CSV and re-ran (and re-wrote)
+    the full scoring pass. That work only needs to happen once; request
+    handlers now read the persisted results.
+    """
+    global _initialized
+    if _initialized:
+        return
+    conn = connect(DEFAULT_DB)
+    try:
+        if DEFAULT_SEED.exists():
+            load_seed_universe(conn, DEFAULT_SEED)
+        score_all(conn)
+    finally:
+        conn.close()
+    _initialized = True
+
+
+def _conn() -> sqlite3.Connection:
+    _ensure_initialized()
+    return connect(DEFAULT_DB)
 
 
 def _page(title: str, body: str) -> str:
@@ -100,7 +122,7 @@ def _page(title: str, body: str) -> str:
 def dashboard() -> str:
     conn = _conn()
     etf_count = conn.execute("SELECT COUNT(*) AS count FROM etf").fetchone()["count"]
-    score_count = len(score_all(conn))
+    score_count = len(read_scores(conn))
     repeated = top_repeated_holdings(conn, limit=5)
     rows = "".join(
         f"<tr><td>{escape(row['holding_symbol'])}</td><td>{row['etf_count']}</td><td>{escape(row['etfs'])}</td></tr>"
@@ -127,7 +149,7 @@ def dashboard() -> str:
 @app.get("/etfs", response_class=HTMLResponse)
 def etfs(limit: int = Query(50, ge=1, le=200)) -> str:
     conn = _conn()
-    scores = score_all(conn)[:limit]
+    scores = read_scores(conn)[:limit]
     rows = "".join(
         "<tr>"
         f"<td>{idx}</td>"
@@ -156,7 +178,7 @@ def etfs(limit: int = Query(50, ge=1, le=200)) -> str:
 def etf_detail(symbol: str) -> str:
     conn = _conn()
     symbol = symbol.upper()
-    score = next((item for item in score_all(conn) if item.symbol == symbol), None)
+    score = next((item for item in read_scores(conn) if item.symbol == symbol), None)
     row = conn.execute("SELECT * FROM etf WHERE symbol = ?", (symbol,)).fetchone()
     if score is None or row is None:
         return _page("ETF Not Found", f"<h2>{escape(symbol)} not found</h2>")
