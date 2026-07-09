@@ -10,7 +10,8 @@ from rich.table import Table
 from atlas.analytics.overlap import compare_etfs, top_repeated_holdings
 from atlas.db.database import connect, load_portfolio_csv, load_seed_universe
 from atlas.journal.service import add_journal_entry, list_journal_entries
-from atlas.portfolio.analysis import portfolio_hidden_concentration, summarize_portfolio
+from atlas.portfolio.analysis import combined_concentration, summarize_portfolio
+from atlas.portfolio.schwab import load_schwab_positions
 from atlas.reports.markdown import write_research_report
 from atlas.scoring.engine import score_all
 
@@ -117,6 +118,23 @@ def import_portfolio(
     console.print(f"Total value: ${summary.total_value:,.2f}")
 
 
+@app.command("import-schwab")
+def import_schwab(
+    positions_csv: Path = typer.Argument(..., help="Schwab Positions CSV export."),
+    name: str = typer.Option("Primary", help="Portfolio name."),
+    db: Path = typer.Option(Path(".atlas/atlas.db"), help="SQLite database path."),
+) -> None:
+    """Import a Charles Schwab Positions CSV export."""
+    conn = connect(db)
+    count = load_schwab_positions(conn, name, positions_csv)
+    summary = summarize_portfolio(conn, name)
+    console.print(f"Imported {count} Schwab positions into portfolio '{summary.name}'.")
+    console.print(
+        f"Total: ${summary.total_value:,.2f} — equity ${summary.equity_value:,.2f}, "
+        f"funds ${summary.fund_value:,.2f}, cash ${summary.cash_value:,.2f}"
+    )
+
+
 @app.command("analyze-portfolio")
 def analyze_portfolio(
     name: str = typer.Option("Primary", help="Portfolio name."),
@@ -128,23 +146,33 @@ def analyze_portfolio(
     summary = summarize_portfolio(conn, name)
     console.print(f"[bold]Portfolio:[/bold] {summary.name}")
     console.print(f"Positions: {summary.position_count}")
-    console.print(f"Total value: ${summary.total_value:,.2f}")
+    console.print(
+        f"Total value: ${summary.total_value:,.2f} — equity ${summary.equity_value:,.2f}, "
+        f"funds ${summary.fund_value:,.2f}, cash ${summary.cash_value:,.2f}"
+    )
 
-    rows = portfolio_hidden_concentration(conn, name, limit=limit)
-    table = Table(title="Estimated Hidden Concentration from ETF Top-Ten Holdings")
-    table.add_column("Holding")
-    table.add_column("Estimated %", justify="right")
-    table.add_column("Appears In", justify="right")
-    table.add_column("Source ETFs")
-    for row in rows:
+    report = combined_concentration(conn, name, limit=limit)
+    table = Table(title="Combined Concentration (Direct + ETF/Fund Look-Through)")
+    table.add_column("Symbol")
+    table.add_column("Exposure %", justify="right")
+    table.add_column("Exposure", justify="right")
+    table.add_column("Direct", justify="right")
+    table.add_column("Look-through", justify="right")
+    table.add_column("Source Funds")
+    for line in report.lines:
         table.add_row(
-            row["holding_symbol"],
-            f"{row['estimated_portfolio_percent']:.2f}%",
-            str(row["appears_in_positions"]),
-            row["source_etfs"],
+            line.symbol,
+            f"{line.exposure_percent:.2f}%",
+            f"${line.exposure_value:,.2f}",
+            f"${line.direct_value:,.2f}",
+            f"${line.lookthrough_value:,.2f}",
+            ", ".join(line.source_funds) or "-",
         )
     console.print(table)
-    console.print("\nNote: v0.4 treats each parsed top-ten holding as equal weight. This is a directionally useful prototype, not final exposure math.")
+    console.print(f"\nFund value not looked through: ${report.unmodeled_fund_value:,.2f}")
+    console.print(
+        "Note: look-through uses the equal-weight top-ten prototype; direct holdings are exact."
+    )
 
 
 @app.command("generate-report")
