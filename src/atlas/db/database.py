@@ -140,7 +140,7 @@ def load_portfolio_csv(conn: sqlite3.Connection, portfolio_name: str, portfolio_
             if not symbol:
                 continue
             raw_value = row.get("Market Value") or row.get("Value") or row.get("Amount") or "0"
-            market_value = float(str(raw_value).replace("$", "").replace(",", "").strip() or 0)
+            market_value = parse_money(raw_value)
             conn.execute(
                 """
                 INSERT INTO portfolio_position (
@@ -151,7 +151,7 @@ def load_portfolio_csv(conn: sqlite3.Connection, portfolio_name: str, portfolio_
                     portfolio_id,
                     symbol,
                     row.get("Description", ""),
-                    row.get("Asset Type", "ETF"),
+                    normalize_asset_type(row.get("Asset Type", "ETF")),
                     market_value,
                     row.get("Notes", ""),
                 ),

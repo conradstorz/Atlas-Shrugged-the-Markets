@@ -9,8 +9,9 @@ class PortfolioSummary:
     name: str
     position_count: int
     total_value: float
-    etf_value: float
-    cash_or_unknown_value: float
+    equity_value: float
+    fund_value: float
+    cash_value: float
 
 
 def summarize_portfolio(conn: sqlite3.Connection, portfolio_name: str) -> PortfolioSummary:
@@ -22,8 +23,9 @@ def summarize_portfolio(conn: sqlite3.Connection, portfolio_name: str) -> Portfo
         SELECT
             COUNT(*) AS position_count,
             COALESCE(SUM(market_value), 0) AS total_value,
-            COALESCE(SUM(CASE WHEN asset_type = 'ETF' THEN market_value ELSE 0 END), 0) AS etf_value,
-            COALESCE(SUM(CASE WHEN asset_type <> 'ETF' THEN market_value ELSE 0 END), 0) AS cash_or_unknown_value
+            COALESCE(SUM(CASE WHEN asset_type = 'equity' THEN market_value ELSE 0 END), 0) AS equity_value,
+            COALESCE(SUM(CASE WHEN asset_type IN ('etf', 'mutual_fund') THEN market_value ELSE 0 END), 0) AS fund_value,
+            COALESCE(SUM(CASE WHEN asset_type = 'cash' THEN market_value ELSE 0 END), 0) AS cash_value
         FROM portfolio_position
         WHERE portfolio_id = ?
         """,
@@ -33,8 +35,9 @@ def summarize_portfolio(conn: sqlite3.Connection, portfolio_name: str) -> Portfo
         name=portfolio["name"],
         position_count=int(row["position_count"]),
         total_value=float(row["total_value"]),
-        etf_value=float(row["etf_value"]),
-        cash_or_unknown_value=float(row["cash_or_unknown_value"]),
+        equity_value=float(row["equity_value"]),
+        fund_value=float(row["fund_value"]),
+        cash_value=float(row["cash_value"]),
     )
 
 

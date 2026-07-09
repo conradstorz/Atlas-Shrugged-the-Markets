@@ -129,18 +129,19 @@ def test_missing_portfolio_raises_value_error(tmp_path: Path) -> None:
         portfolio_hidden_concentration(conn, "does-not-exist")
 
 
-def test_summarize_splits_etf_and_other_value(tmp_path: Path) -> None:
+def test_summarize_splits_equity_fund_and_cash_value(tmp_path: Path) -> None:
     conn = connect(tmp_path / "atlas.db")
     _seed_universe(conn)
     _add_portfolio(
         conn,
         "P",
-        [("AAA", 60000, "ETF"), ("BBB", 40000, "ETF"), ("CASH", 100000, "Cash")],
+        [("AAA", 60000, "etf"), ("NVDA", 40000, "equity"), ("CASH", 100000, "cash")],
     )
 
     summary = summarize_portfolio(conn, "P")
 
     assert summary.position_count == 3
     assert summary.total_value == 200000
-    assert summary.etf_value == 100000
-    assert summary.cash_or_unknown_value == 100000
+    assert summary.equity_value == 40000
+    assert summary.fund_value == 60000
+    assert summary.cash_value == 100000
