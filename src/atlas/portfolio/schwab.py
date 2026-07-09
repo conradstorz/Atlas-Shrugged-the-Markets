@@ -26,7 +26,9 @@ def load_schwab_positions(conn: sqlite3.Connection, portfolio_name: str, path: P
     located by name from the header row (the row whose first cell is "Symbol"),
     so column reordering is tolerated. The "Cash & Cash Investments" row is
     stored under the synthetic symbol ``CASH``. Existing positions for the
-    portfolio are replaced.
+    portfolio are replaced on each load. A symbol that appears in more than
+    one account section of the file has its market value summed across those
+    sections. Returns the number of distinct stored positions.
     """
     conn.execute(
         "INSERT INTO portfolio (name) VALUES (?) ON CONFLICT(name) DO NOTHING",
@@ -37,7 +39,6 @@ def load_schwab_positions(conn: sqlite3.Connection, portfolio_name: str, path: P
     ).fetchone()["id"]
     conn.execute("DELETE FROM portfolio_position WHERE portfolio_id = ?", (portfolio_id,))
 
-    count = 0
     header: dict[str, int] | None = None
     with path.open("r", encoding="utf-8-sig", newline="") as csv_file:
         for cells in csv.reader(csv_file):
@@ -71,10 +72,12 @@ def load_schwab_positions(conn: sqlite3.Connection, portfolio_name: str, path: P
                 ON CONFLICT(portfolio_id, symbol) DO UPDATE SET
                     description=excluded.description,
                     asset_type=excluded.asset_type,
-                    market_value=excluded.market_value
+                    market_value=portfolio_position.market_value + excluded.market_value
                 """,
                 (portfolio_id, symbol, description, asset_type, market_value),
             )
-            count += 1
     conn.commit()
-    return count
+    return conn.execute(
+        "SELECT COUNT(*) AS count FROM portfolio_position WHERE portfolio_id = ?",
+        (portfolio_id,),
+    ).fetchone()["count"]
