@@ -17,6 +17,8 @@ import pytest
 
 from atlas.db.database import connect
 from atlas.portfolio.analysis import (
+    ConcentrationReport,
+    combined_concentration,
     portfolio_hidden_concentration,
     summarize_portfolio,
 )
@@ -145,3 +147,70 @@ def test_summarize_splits_equity_fund_and_cash_value(tmp_path: Path) -> None:
     assert summary.equity_value == 40000
     assert summary.fund_value == 60000
     assert summary.cash_value == 100000
+
+
+def test_combined_concentration_sums_direct_and_lookthrough(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "atlas.db")
+    # FUND holds {NVDA, AAPL}; portfolio holds NVDA directly and FUND.
+    conn.execute("INSERT INTO etf (symbol, description) VALUES ('FUND', 'A fund')")
+    for rank, h in enumerate(["NVDA", "AAPL"], start=1):
+        conn.execute(
+            "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank) VALUES ('FUND', ?, ?)",
+            (h, rank),
+        )
+    conn.commit()
+    _add_portfolio(conn, "P", [("NVDA", 100, "equity"), ("FUND", 100, "etf")])
+
+    report = combined_concentration(conn, "P")
+    by_symbol = {line.symbol: line for line in report.lines}
+
+    assert report.total_value == 200
+    # NVDA: 100 direct + 100/2 look-through = 150 -> 75%
+    assert by_symbol["NVDA"].exposure_value == 150.0
+    assert by_symbol["NVDA"].exposure_percent == 75.0
+    assert by_symbol["NVDA"].direct_value == 100.0
+    assert by_symbol["NVDA"].lookthrough_value == 50.0
+    assert by_symbol["NVDA"].source_funds == ["FUND"]
+    # AAPL: 50 look-through only -> 25%
+    assert by_symbol["AAPL"].exposure_value == 50.0
+    assert by_symbol["AAPL"].direct_value == 0.0
+    assert report.unmodeled_fund_value == 0.0
+
+
+def test_combined_concentration_reports_unmodeled_fund_value(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "atlas.db")
+    # FUND has no parsed holdings -> cannot be looked through.
+    _add_portfolio(conn, "P", [("NVDA", 100, "equity"), ("FUND", 100, "etf")])
+
+    report = combined_concentration(conn, "P")
+    by_symbol = {line.symbol: line for line in report.lines}
+
+    assert by_symbol["NVDA"].exposure_value == 100.0
+    assert by_symbol["NVDA"].exposure_percent == 50.0
+    assert "FUND" not in by_symbol
+    assert report.unmodeled_fund_value == 100.0
+
+
+def test_combined_concentration_sorted_desc(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "atlas.db")
+    _add_portfolio(conn, "P", [("NVDA", 100, "equity"), ("AAPL", 300, "equity")])
+
+    report = combined_concentration(conn, "P")
+
+    assert [line.symbol for line in report.lines] == ["AAPL", "NVDA"]
+
+
+def test_combined_concentration_zero_total_is_empty(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "atlas.db")
+    _add_portfolio(conn, "P", [("NVDA", 0, "equity")])
+
+    report = combined_concentration(conn, "P")
+
+    assert report.lines == []
+    assert report.total_value == 0.0
+
+
+def test_combined_concentration_missing_portfolio_raises(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "atlas.db")
+    with pytest.raises(ValueError):
+        combined_concentration(conn, "nope")
