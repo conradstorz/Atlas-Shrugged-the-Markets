@@ -7,6 +7,45 @@ from pathlib import Path
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
 
+def parse_money(raw: str | None) -> float:
+    """Parse a Schwab-style money cell (``$9,846.00``) into a float.
+
+    Placeholders (``--``, ``N/A``), empty strings, and ``None`` become ``0.0``.
+    Never raises on malformed input.
+    """
+    if raw is None:
+        return 0.0
+    text = str(raw).strip()
+    if text in {"", "--", "N/A"}:
+        return 0.0
+    text = text.replace("$", "").replace(",", "").strip()
+    try:
+        return float(text or 0)
+    except ValueError:
+        return 0.0
+
+
+def normalize_asset_type(raw: str | None) -> str:
+    """Normalize a security-type label to the Atlas vocabulary.
+
+    Returns one of: ``equity``, ``etf``, ``mutual_fund``, ``cash``, ``other``.
+    Matching is case-insensitive and substring-based so it tolerates both the
+    Schwab labels ("ETFs & Closed End Funds") and legacy CSV values ("ETF").
+    """
+    text = (raw or "").strip().lower()
+    if not text or text in {"--", "n/a"}:
+        return "other"
+    if "cash" in text or "money market" in text:
+        return "cash"
+    if "mutual fund" in text:
+        return "mutual_fund"
+    if "etf" in text or "closed end" in text:
+        return "etf"
+    if "equity" in text:
+        return "equity"
+    return "other"
+
+
 def connect(db_path: Path) -> sqlite3.Connection:
     """Open an Atlas SQLite database and ensure the schema exists."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
