@@ -1,0 +1,76 @@
+# Operating system
+.DS_Store
+Thumbs.db
+
+# Editor and workspace state
+.vscode/
+.idea/
+*.code-workspace
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.hypothesis/
+.ipynb_checkpoints/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Build and packaging artifacts
+build/
+dist/
+site/
+htmlcov/
+.coverage
+.coverage.*
+pip-wheel-metadata/
+
+# Logs and transient output
+*.log
+logs/
+tmp/
+temp/
+.cache/
+
+# Secrets and local-only configuration
+.env
+.env.*
+*.env
+*.secret
+*.secrets
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.cer
+*.csr
+*.jks
+*.keystore
+secrets/
+private/
+
+# Local databases and dumps
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.sqlite
+*.sqlite3
+*.duckdb
+
+# Generated reports
+reports/*.html
+reports/*.json
+reports/*.csv
+reports/*.txt
