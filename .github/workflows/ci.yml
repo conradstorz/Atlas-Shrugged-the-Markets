@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # pyproject declares requires-python = ">=3.11". Test the floor as well
+        # as the version developed against, so the support claim stays honest.
+        python-version: ["3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+
+      # --locked fails if uv.lock is stale. Atlas has already survived one
+      # poisoned lockfile (see the pins in pyproject.toml); resolving fresh
+      # dependencies in CI would silently defeat those pins.
+      - name: Install dependencies
+        run: uv sync --locked --dev
+
+      - name: Run tests
+        run: uv run pytest

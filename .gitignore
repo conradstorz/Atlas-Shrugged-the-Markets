@@ -69,7 +69,9 @@ private/
 *.sqlite3
 *.duckdb
 
-# Generated reports
+# Generated reports. `atlas generate-report` writes Markdown here by default
+# and the report embeds private portfolio positions and dollar values.
+reports/*.md
 reports/*.html
 reports/*.json
 reports/*.csv
