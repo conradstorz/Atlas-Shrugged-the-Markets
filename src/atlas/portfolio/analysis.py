@@ -232,11 +232,20 @@ def combined_concentration(
         ).fetchall()
 
         if weighted_holdings:
-            modeled_share = sum(float(h["weight"]) for h in weighted_holdings) / 100.0
+            total_weight = sum(float(h["weight"]) for h in weighted_holdings)
+            # Issuer files routinely round to a total a hair off 100%, and the
+            # ingest guard admits anything up to 100.5. Taken literally, a file
+            # summing to 100.3 would model $10,030 of a $10,000 position and
+            # report 100.30% coverage against a -$30.00 unmodeled remainder.
+            # Normalize the excess away instead: the weights are relative, and
+            # the surplus is rounding noise, not exposure. A total UNDER 100 is
+            # left alone — there the shortfall is genuinely unmodeled fund.
+            excess_scale = 100.0 / total_weight if total_weight > 100.0 else 1.0
+            modeled_share = min(total_weight / 100.0, 1.0)
             modeled_value = fund_value * modeled_share
             for holding in weighted_holdings:
                 symbol = holding["holding_symbol"]
-                contribution = fund_value * float(holding["weight"]) / 100.0
+                contribution = fund_value * float(holding["weight"]) / 100.0 * excess_scale
                 lookthrough[symbol] = lookthrough.get(symbol, 0.0) + contribution
                 sources.setdefault(symbol, set()).add(fund_symbol)
             unmodeled_fund_value += fund_value - modeled_value

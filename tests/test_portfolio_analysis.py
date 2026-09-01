@@ -340,3 +340,48 @@ def test_universe_coverage_fund_with_only_holdings_file_rows_is_weighted_not_mem
     assert coverage.weighted_funds == 1
     assert coverage.membership_only_funds == 0
     assert coverage.no_holdings_funds == 0
+
+
+def test_weights_summing_over_100_do_not_overmodel_the_position(tmp_path: Path) -> None:
+    """A file rounding to just over 100% must not model more than the position.
+
+    The ingest guard admits totals up to 100.5, so taken literally a 100.30%
+    file would report $10,030 modeled against a $10,000 position, 100.30%
+    coverage, and a negative unmodeled remainder. The surplus is rounding
+    noise in the issuer's own weights, not exposure.
+    """
+    conn = connect(tmp_path / "atlas.db")
+    _add_weighted_holdings(conn, "XYZ", [("AAA", 50.20), ("BBB", 50.10)])
+    _add_portfolio(conn, "P", [("XYZ", 10000, "etf")])
+
+    report = combined_concentration(conn, "P")
+
+    coverage = report.fund_coverage[0]
+    assert coverage.modeled_share == 1.0
+    assert coverage.modeled_value == 10000.00
+    assert report.modeled_value == pytest.approx(10000.00)
+    assert report.unmodeled_fund_value == 0.00
+    assert report.unmodeled_fund_value >= 0.0
+    # Contributions stay proportional to the issuer's relative weights.
+    by_symbol = {line.symbol: line for line in report.lines}
+    assert by_symbol["AAA"].lookthrough_value == pytest.approx(5004.99, abs=0.01)
+    assert by_symbol["BBB"].lookthrough_value == pytest.approx(4995.01, abs=0.01)
+    assert sum(line.lookthrough_value for line in report.lines) == pytest.approx(10000.00, abs=0.01)
+    assert report.modeled_value + report.unmodeled_fund_value + report.cash_value + report.other_value == pytest.approx(report.total_value)
+
+
+def test_weights_summing_under_100_still_leave_a_real_remainder(tmp_path: Path) -> None:
+    """Normalization must apply ONLY to the over-100 case.
+
+    A partial holdings file (a top-ten export, say) genuinely models only part
+    of the fund; scaling it up to 100% would reinvent the equal-weight lie.
+    """
+    conn = connect(tmp_path / "atlas.db")
+    _add_weighted_holdings(conn, "XYZ", [("AAA", 12.00), ("BBB", 6.00)])
+    _add_portfolio(conn, "P", [("XYZ", 10000, "etf")])
+
+    report = combined_concentration(conn, "P")
+
+    assert report.fund_coverage[0].modeled_share == pytest.approx(0.18)
+    assert report.modeled_value == pytest.approx(1800.00)
+    assert report.unmodeled_fund_value == pytest.approx(8200.00)
