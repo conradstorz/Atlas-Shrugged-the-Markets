@@ -13,7 +13,7 @@ def test_report_contains_scoreboard(tmp_path: Path) -> None:
     report = build_research_report(conn)
     assert "# Atlas Research Report" in report
     assert "## ETF Scoreboard" in report
-    assert "## Most Repeated Seed Holdings" in report
+    assert "## Most Repeated Top-Ten Holdings" in report
 
 
 def test_journal_round_trip(tmp_path: Path) -> None:
@@ -66,6 +66,38 @@ def test_report_concentration_preamble_drops_stale_prototype_language(tmp_path: 
     assert "prototype estimate" not in report
     assert "Full holdings are not yet imported." not in report
     assert "Top-ten holdings do not include actual holding weights in the seed file." not in report
+
+
+def test_report_does_not_claim_truncation_above_an_empty_table(tmp_path: Path) -> None:
+    """The shipped state (nothing imported) models no names at all.
+
+    A caveat reading "the top 0 names by exposure; it is not the full modeled
+    set" above an empty table is a false claim about a table that is, in fact,
+    the whole (empty) modeled set.
+    """
+    conn = connect(tmp_path / "atlas.db")
+    load_seed_universe(conn, Path("data/atlas_seed_universe.csv"))
+    load_portfolio_csv(conn, "Primary", Path("examples/sample_portfolio.csv"))
+    report = build_research_report(conn, portfolio_name="Primary")
+    assert "top 0 names" not in report
+    assert "it is not the full modeled set" not in report
+
+
+def test_report_claims_truncation_only_when_the_table_is_full(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "atlas.db")
+    load_seed_universe(conn, Path("data/atlas_seed_universe.csv"))
+    load_portfolio_csv(conn, "Primary", Path("examples/sample_portfolio.csv"))
+    wide = tmp_path / "wide_holdings.csv"
+    wide.write_text(
+        "Ticker,Name,Weight\n"
+        + "".join(f"W{index:02d},Widget {index} Inc,1.0\n" for index in range(1, 41)),
+        encoding="utf-8",
+    )
+    load_fund_holdings(conn, "SCHB", wide)
+    report = build_research_report(conn, portfolio_name="Primary")
+    # 40 modeled names, trimmed to the report's 25-row table.
+    assert "top 25 names by exposure" in report
+    assert "it is not the full modeled set" in report
 
 
 def test_report_shows_modeled_percent_for_weighted_fund(tmp_path: Path) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
+from atlas.analytics.overlap import TOP_TEN_CTE, holdings_weight_source, top_ten_holdings
 from atlas.parsing import parse_percent
 from atlas.scoring.model import ScoreBreakdown
 
@@ -13,11 +14,17 @@ SECTOR_TERMS = ("technology", "semiconductor", "energy", "health care", "financi
 
 
 def _universe_holding_frequency(conn: sqlite3.Connection) -> dict[str, int]:
-    """Map each holding to the number of ETFs whose top-ten contains it."""
+    """Map each holding to the number of ETFs whose top ten contains it.
+
+    Uses the shared top-ten rule (:data:`~atlas.analytics.overlap.TOP_TEN_CTE`)
+    rather than every ``etf_holding`` row, so a fund with an imported 300-row
+    holdings file contributes exactly ten names here, like every other fund.
+    """
     rows = conn.execute(
-        """
+        TOP_TEN_CTE
+        + """
         SELECT holding_symbol, COUNT(DISTINCT etf_symbol) AS df
-        FROM etf_holding
+        FROM atlas_top_ten
         GROUP BY holding_symbol
         """
     ).fetchall()
@@ -38,7 +45,11 @@ def measured_diversification(holdings: list[str], freq: dict[str, int]) -> int |
     return round(unique / len(holdings) * 10)
 
 
-def score_etf(row: sqlite3.Row, diversification_override: int | None = None) -> ScoreBreakdown:
+def score_etf(
+    row: sqlite3.Row,
+    diversification_override: int | None = None,
+    holdings_source: str | None = None,
+) -> ScoreBreakdown:
     """Generate a transparent, partly data-grounded score for an ETF.
 
     Cost comes from the real expense ratio, resilience is eroded by the real
@@ -46,6 +57,11 @@ def score_etf(row: sqlite3.Row, diversification_override: int | None = None) -> 
     top-ten holdings overlap (passed in via ``diversification_override``). The AI
     signal is still a keyword heuristic; valuation and drawdown data are not yet
     connected. Kept deliberately explainable rather than final.
+
+    ``holdings_source`` names where that top ten came from — ``'holdings_file'``
+    for a fund's real ten highest-weight holdings, ``'seed_top_ten'`` for the
+    seed select-list membership — so the explanation states its own basis
+    instead of leaving the reader to guess.
     """
     symbol = row["symbol"]
     text = f"{row['description']} {row['category']}".lower()
@@ -123,11 +139,12 @@ def score_etf(row: sqlite3.Row, diversification_override: int | None = None) -> 
     )
     overall = max(0, min(100, overall))
 
-    diversification_basis = (
-        "measured from top-ten holdings overlap"
-        if diversification_override is not None
-        else "role-based default (no parsed holdings)"
-    )
+    if diversification_override is None:
+        diversification_basis = "role-based default (no parsed holdings)"
+    elif holdings_source == "holdings_file":
+        diversification_basis = "measured from top-ten holdings overlap, top ten by imported weight"
+    else:
+        diversification_basis = "measured from top-ten holdings overlap, seed select-list top ten"
     explanation = (
         f"Role={role}; AI={ai_score}/10; resilience={resilience_score}/10; "
         f"diversification={diversification_score}/10 ({diversification_basis}); "
@@ -182,15 +199,15 @@ def score_all(conn: sqlite3.Connection) -> list[ScoreBreakdown]:
     rows = conn.execute("SELECT * FROM etf ORDER BY symbol").fetchall()
     scores = []
     for row in rows:
-        holdings = [
-            holding["holding_symbol"]
-            for holding in conn.execute(
-                "SELECT holding_symbol FROM etf_holding WHERE etf_symbol = ? ORDER BY rank",
-                (row["symbol"],),
-            ).fetchall()
-        ]
+        holdings = top_ten_holdings(conn, row["symbol"])
         override = measured_diversification(holdings, freq)
-        scores.append(score_etf(row, diversification_override=override))
+        scores.append(
+            score_etf(
+                row,
+                diversification_override=override,
+                holdings_source=holdings_weight_source(conn, row["symbol"]),
+            )
+        )
     for score in scores:
         conn.execute(
             """

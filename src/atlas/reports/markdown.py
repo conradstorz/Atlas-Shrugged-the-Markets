@@ -7,6 +7,7 @@ from pathlib import Path
 from atlas.analytics.overlap import top_repeated_holdings
 from atlas.portfolio.analysis import combined_concentration, summarize_portfolio
 from atlas.scoring.engine import score_all
+from atlas.scoring.model import SCORER_VERSION
 
 
 def _money(value: float) -> str:
@@ -29,7 +30,7 @@ def build_research_report(conn: sqlite3.Connection, portfolio_name: str | None =
         "",
         "## ETF Scoreboard",
         "",
-        "These scores are still v0.4 heuristic scores. They are useful for building the explainable workflow, not for pretending the model is finished.",
+        f"These scores are still {SCORER_VERSION} heuristic scores. They are useful for building the explainable workflow, not for pretending the model is finished.",
         "",
         "| Rank | ETF | Score | Role | AI | Resilience | Cost | Diversification |",
         "|---:|---|---:|---|---:|---:|---:|---:|",
@@ -44,7 +45,7 @@ def build_research_report(conn: sqlite3.Connection, portfolio_name: str | None =
 
     lines.extend([
         "",
-        "## Most Repeated Seed Holdings",
+        "## Most Repeated Top-Ten Holdings",
         "",
         "This section shows companies appearing repeatedly in ETF top-ten lists. It is the first warning system for hidden concentration.",
         "",
@@ -72,7 +73,8 @@ def build_research_report(conn: sqlite3.Connection, portfolio_name: str | None =
             "much of this portfolio's dollars are actually modeled.",
             "",
         ])
-        report_data = combined_concentration(conn, portfolio_name, limit=25)
+        concentration_limit = 25
+        report_data = combined_concentration(conn, portfolio_name, limit=concentration_limit)
         modeled_percent = (
             round(report_data.modeled_value / report_data.total_value * 100, 2)
             if report_data.total_value
@@ -103,6 +105,22 @@ def build_research_report(conn: sqlite3.Connection, portfolio_name: str | None =
                 f"| {fc.symbol} | {_money(fc.market_value)} | {'Yes' if fc.has_weights else 'No'} | "
                 f"{fc.modeled_share * 100:.2f}% | {_money(fc.modeled_value)} |"
             )
+        # Only claim truncation when truncation actually happened.
+        # `combined_concentration` trims to `limit`, so a full-length table is
+        # the only truncation signal available. Deriving a "remaining" figure by
+        # subtracting the visible rows from `modeled_value` would be exactly the
+        # kind of unsupported number this caveat exists to prevent — as would
+        # announcing "the top 0 names" above an empty table, which is what
+        # `len(report_data.lines)` produced in the shipped, nothing-imported
+        # state. A modeled set that lands on precisely `limit` names prints the
+        # caveat unnecessarily; that false positive is far cheaper than a reader
+        # mistaking a partial table for the whole one.
+        truncation_note = (
+            f" The table below shows the top {concentration_limit} names by exposure; "
+            "it is not the full modeled set (see the Coverage dollar totals above for that)."
+            if len(report_data.lines) == concentration_limit
+            else ""
+        )
         lines.extend([
             "",
             "### Combined Concentration",
@@ -111,9 +129,7 @@ def build_research_report(conn: sqlite3.Connection, portfolio_name: str | None =
             "ETF/fund look-through. Both direct dollars and weighted look-through "
             "are exact math, not estimates. Fund value without an imported "
             "holdings file is excluded from this table rather than estimated — "
-            "see Coverage above for how much that is. The table below shows the "
-            f"top {len(report_data.lines)} names by exposure; it is not the "
-            "full modeled set (see the Coverage dollar totals above for that).",
+            "see Coverage above for how much that is." + truncation_note,
             "",
             "| Symbol | Exposure % | Exposure | Direct | Look-through | Source Funds |",
             "|---|---:|---:|---:|---:|---|",

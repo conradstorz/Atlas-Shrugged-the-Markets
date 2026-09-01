@@ -9,11 +9,13 @@ from rich.table import Table
 
 from atlas.analytics.overlap import compare_etfs, top_repeated_holdings
 from atlas.db.database import connect, load_fund_holdings, load_portfolio_csv, load_seed_universe
+from atlas.exceptions import AtlasDataError
 from atlas.journal.service import add_journal_entry, list_journal_entries
 from atlas.portfolio.analysis import combined_concentration, summarize_portfolio, universe_coverage
 from atlas.portfolio.schwab import load_schwab_positions
 from atlas.reports.markdown import write_research_report
 from atlas.scoring.engine import score_all
+from atlas.scoring.model import SCORER_VERSION
 
 app = typer.Typer(help="Atlas private investment decision intelligence CLI.")
 console = Console()
@@ -36,12 +38,12 @@ def score_etfs(
     db: Path = typer.Option(Path(".atlas/atlas.db"), help="SQLite database path."),
     limit: int = typer.Option(25, help="Number of ranked ETFs to display."),
 ) -> None:
-    """Load the seed universe and print v0.4 explainable ETF scores."""
+    """Load the seed universe and print explainable ETF scores."""
     conn = connect(db)
     loaded = load_seed_universe(conn, seed)
     scores = score_all(conn)
 
-    table = Table(title=f"Atlas ETF Scores v0.4 — {loaded} ETFs loaded")
+    table = Table(title=f"Atlas ETF Scores {SCORER_VERSION} — {loaded} ETFs loaded")
     table.add_column("Rank", justify="right")
     table.add_column("ETF")
     table.add_column("Score", justify="right")
@@ -64,7 +66,11 @@ def score_etfs(
         )
 
     console.print(table)
-    console.print("\nThis is still a heuristic scoring pass. Full holdings and valuation enrichment come next.")
+    console.print(
+        "\nThis is still a heuristic scoring pass. Diversification is measured from each "
+        "fund's top ten — its real top ten by weight where `atlas import-holdings` has been "
+        "run, its seed select-list top ten otherwise. Valuation enrichment comes next."
+    )
 
 
 @app.command("compare-overlap")
@@ -95,7 +101,7 @@ def repeat_holdings(
     """Show companies appearing most often across ETF top-ten lists."""
     conn = connect(db)
     rows = top_repeated_holdings(conn, limit=limit)
-    table = Table(title="Most Repeated Seed Holdings")
+    table = Table(title="Most Repeated Top-Ten Holdings")
     table.add_column("Holding")
     table.add_column("ETF Count", justify="right")
     table.add_column("ETFs")
@@ -144,7 +150,14 @@ def import_holdings(
     """Import an issuer fund-holdings CSV (with weights) for one ETF."""
     conn = connect(db)
     symbol = symbol.strip().upper()
-    count = load_fund_holdings(conn, symbol, holdings_csv)
+    try:
+        count = load_fund_holdings(conn, symbol, holdings_csv)
+    except AtlasDataError as exc:
+        # A misread holdings file is the most dangerous realistic failure mode,
+        # so it must read as a clean, actionable error rather than a Rich
+        # traceback with a local-variable dump. Same shape as `coverage`.
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
     if count == 0:
         console.print(f"Imported 0 holdings for {symbol}. No usable rows were found in {holdings_csv}.")
         return
@@ -222,7 +235,13 @@ def analyze_portfolio(
     db: Path = typer.Option(Path(".atlas/atlas.db"), help="SQLite database path."),
     limit: int = typer.Option(20, help="Number of hidden concentration rows."),
 ) -> None:
-    """Summarize a private portfolio and estimate hidden top-ten concentration."""
+    """Summarize a private portfolio and report its exact combined concentration.
+
+    Combines directly-held positions with weighted look-through into funds whose
+    real holdings have been imported (`atlas import-holdings`). Nothing here is
+    estimated: fund value without imported weights is reported as unmodeled
+    rather than spread across a guess.
+    """
     conn = connect(db)
     summary = summarize_portfolio(conn, name)
     console.print(f"[bold]Portfolio:[/bold] {summary.name}")

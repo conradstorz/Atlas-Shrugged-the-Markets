@@ -13,8 +13,6 @@ import pytest
 
 from atlas.db.database import connect
 from atlas.portfolio.analysis import (
-    ConcentrationReport,
-    FundCoverage,
     UniverseCoverage,
     combined_concentration,
     summarize_portfolio,
