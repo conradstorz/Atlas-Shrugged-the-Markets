@@ -50,13 +50,17 @@ CREATE TABLE etf_holding (
     PRIMARY KEY (etf_symbol, holding_symbol)
 );
 
+-- `etf_score` on the CURRENT shape, so `_repair_etf_score_schema` has no
+-- reason to fire. This fixture exists to test the `etf_holding` rebuild; the
+-- point of the assertion below is that the rebuild leaves `etf_score` alone,
+-- which only means something if nothing else is rebuilding it either.
 CREATE TABLE etf_score (
     symbol TEXT PRIMARY KEY REFERENCES etf(symbol),
     role TEXT NOT NULL,
-    overall_score INTEGER NOT NULL,
+    overall_score INTEGER,
     ai_score INTEGER NOT NULL,
-    resilience_score INTEGER NOT NULL,
-    cost_score INTEGER NOT NULL,
+    resilience_score INTEGER,
+    cost_score INTEGER,
     diversification_score INTEGER,
     explanation TEXT NOT NULL
 );

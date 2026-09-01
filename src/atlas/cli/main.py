@@ -53,27 +53,41 @@ def score_etfs(
     table.add_column("Cost", justify="right")
     table.add_column("Diversification", justify="right")
 
+    # `score_all` already ranks unscored funds last, so the rank number here is
+    # simply the fund's position in that ranking. A fund with no overall score
+    # sits below every scored one because Atlas has no basis for placing it
+    # anywhere else, not because it has been judged worse.
     for rank, score in enumerate(scores[:limit], start=1):
         table.add_row(
             str(rank),
             score.symbol,
-            str(score.overall_score),
+            format_component(score.overall_score),
             score.role,
             str(score.ai_score),
-            str(score.resilience_score),
-            str(score.cost_score),
+            format_component(score.resilience_score),
+            format_component(score.cost_score),
             format_component(score.diversification_score),
         )
 
     console.print(table)
     console.print(
-        "\nThis is still a heuristic scoring pass. Diversification is the measured breadth "
-        "of a fund's holdings, and is only measurable from an imported holdings file "
-        "covering essentially the whole fund. A dash means it was not measured: the "
-        "component was excluded and the fund's other components reweighted over the same "
-        "budget, so the gap neither helps nor hurts. Run `atlas import-holdings` to measure "
-        "it. Valuation enrichment comes next."
+        "\nThis is still a heuristic scoring pass. A dash means Atlas did not measure that "
+        "component: cost needs a gross expense ratio, resilience needs an "
+        "information-technology exposure figure, and diversification needs a holdings file "
+        "covering essentially the whole fund (`atlas import-holdings`). An unmeasured "
+        "component is excluded and the fund's remaining components share the same budget, "
+        "so the gap neither helps nor hurts. Valuation enrichment comes next."
     )
+    unscored = sum(1 for score in scores if score.overall_score is None)
+    if unscored:
+        console.print(
+            f"\n{unscored} of {len(scores)} funds have no overall score (a dash in the Score "
+            "column) and are ranked last. Nothing about them is measurable from the data on "
+            "file, and a number assembled from the AI keyword heuristic alone would be a "
+            "guess wearing a measurement's clothes. Add an expense ratio or an "
+            "information-technology exposure to the seed row, or import a holdings file, to "
+            "score them."
+        )
 
 
 @app.command("compare-overlap")

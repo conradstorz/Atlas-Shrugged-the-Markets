@@ -1,10 +1,15 @@
 """Tests for repairing an `etf_score` table created before nullable scores.
 
 `connect()` applies the schema with `CREATE TABLE IF NOT EXISTS`, so relaxing
-the `NOT NULL` on `etf_score.diversification_score` does nothing to a database
+a `NOT NULL` on one of `etf_score`'s score columns does nothing to a database
 that already exists — the investor's own `.atlas/atlas.db` would keep the old
 constraint and reject every unmeasured score. `etf_score` is a pure cache of
 values `score_all` recomputes, so it can be rebuilt.
+
+The columns were relaxed in two rounds: `diversification_score` first (issue
+#6), then `overall_score`, `resilience_score` and `cost_score` (issue #10). So
+there are two legacy shapes in the wild and both are covered here, including
+the intermediate one a database created between the changes would carry.
 
 The tables that hold what the investor typed in by hand — `portfolio`,
 `portfolio_position`, `decision_journal_entry` — must survive the repair
@@ -16,9 +21,9 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from atlas.db.database import connect
+from atlas.db.database import NULLABLE_ETF_SCORE_COLUMNS, connect
 
-# The `etf_score` table exactly as it was created before this change.
+# The `etf_score` table as it was before any score column became nullable.
 LEGACY_ETF_SCORE_DDL = """
 CREATE TABLE etf_score (
     symbol TEXT PRIMARY KEY REFERENCES etf(symbol),
@@ -32,17 +37,40 @@ CREATE TABLE etf_score (
 );
 """
 
+# The intermediate shape: `diversification_score` relaxed by issue #6, the
+# other three still NOT NULL. A database created between the two changes has
+# this, and it is the shape that would go on rejecting every unscored fund if
+# the repair only ever looked at `diversification_score`.
+POST_ISSUE_6_ETF_SCORE_DDL = """
+CREATE TABLE etf_score (
+    symbol TEXT PRIMARY KEY REFERENCES etf(symbol),
+    role TEXT NOT NULL,
+    overall_score INTEGER NOT NULL,
+    ai_score INTEGER NOT NULL,
+    resilience_score INTEGER NOT NULL,
+    cost_score INTEGER NOT NULL,
+    diversification_score INTEGER,
+    explanation TEXT NOT NULL
+);
+"""
+
 
 def _rows(conn: sqlite3.Connection, sql: str) -> list[tuple]:
     """Fetch rows as plain tuples; `sqlite3.Row` does not compare equal to one."""
     return [tuple(row) for row in conn.execute(sql).fetchall()]
 
 
+def _nullable_columns(conn: sqlite3.Connection) -> set[str]:
+    """The `etf_score` columns that currently accept NULL."""
+    return {
+        column["name"]
+        for column in conn.execute("PRAGMA table_info(etf_score)").fetchall()
+        if not column["notnull"]
+    }
+
+
 def _diversification_is_nullable(conn: sqlite3.Connection) -> bool:
-    columns = conn.execute("PRAGMA table_info(etf_score)").fetchall()
-    return not any(
-        column["name"] == "diversification_score" and column["notnull"] for column in columns
-    )
+    return "diversification_score" in _nullable_columns(conn)
 
 
 def _insert_unmeasured_score(conn: sqlite3.Connection, symbol: str = "AAA") -> None:
@@ -55,10 +83,22 @@ def _insert_unmeasured_score(conn: sqlite3.Connection, symbol: str = "AAA") -> N
     conn.commit()
 
 
-def _make_legacy_database(db_path: Path) -> None:
-    """Create a database with the old NOT NULL column and investor-entered data."""
+def _insert_unscored_fund(conn: sqlite3.Connection, symbol: str = "CCC") -> None:
+    """Store a fund with no measurable component at all: every score column NULL."""
+    conn.execute("INSERT INTO etf (symbol, description) VALUES (?, ?)", (symbol, "A fund"))
+    conn.execute(
+        "INSERT INTO etf_score (symbol, role, overall_score, ai_score, resilience_score, "
+        "cost_score, diversification_score, explanation) "
+        "VALUES (?, ?, NULL, ?, NULL, NULL, NULL, ?)",
+        (symbol, "Foundation", 8, "Not scored: no expense ratio, ..."),
+    )
+    conn.commit()
+
+
+def _make_legacy_database(db_path: Path, etf_score_ddl: str = LEGACY_ETF_SCORE_DDL) -> None:
+    """Create a database on an old `etf_score` shape, with investor-entered data."""
     raw = sqlite3.connect(db_path)
-    raw.executescript(LEGACY_ETF_SCORE_DDL)
+    raw.executescript(etf_score_ddl)
     raw.executescript(
         """
         CREATE TABLE portfolio (
@@ -150,3 +190,82 @@ def test_repair_is_idempotent(tmp_path: Path) -> None:
     # A third open must not drop the rows the second one wrote.
     reopened = connect(db_path)
     assert _rows(reopened, "SELECT symbol FROM etf_score") == [("AAA",)]
+
+
+# --- issue #10: the other three score columns become nullable too -------------
+
+# Imported from the production constant rather than restated. A fifth column
+# relaxed one day should widen what these tests demand, not silently disagree
+# with the code and fail for the wrong reason.
+EXPECTED_NULLABLE = set(NULLABLE_ETF_SCORE_COLUMNS)
+
+
+def test_post_issue_6_database_is_repaired_for_the_remaining_columns(tmp_path: Path) -> None:
+    """The intermediate shape must be repaired, not mistaken for the current one.
+
+    Its `diversification_score` is already nullable, so a check that looked at
+    that column alone would find nothing to do and leave `overall_score`,
+    `resilience_score` and `cost_score` rejecting every unscored fund.
+    """
+    db_path = tmp_path / "post6.db"
+    _make_legacy_database(db_path, POST_ISSUE_6_ETF_SCORE_DDL)
+
+    conn = connect(db_path)
+
+    assert EXPECTED_NULLABLE <= _nullable_columns(conn)
+    _insert_unscored_fund(conn)  # would raise IntegrityError against the old columns
+    stored = conn.execute(
+        "SELECT overall_score, resilience_score, cost_score, diversification_score "
+        "FROM etf_score WHERE symbol = 'CCC'"
+    ).fetchone()
+    assert tuple(stored) == (None, None, None, None)
+
+
+def test_post_issue_6_repair_leaves_investor_entered_tables_alone(tmp_path: Path) -> None:
+    db_path = tmp_path / "post6.db"
+    _make_legacy_database(db_path, POST_ISSUE_6_ETF_SCORE_DDL)
+
+    conn = connect(db_path)
+
+    assert _rows(conn, "SELECT name, notes FROM portfolio") == [("Primary", "hand-entered")]
+    assert _rows(conn, "SELECT symbol, market_value FROM portfolio_position") == [("SCHB", 50000.0)]
+    assert _rows(conn, "SELECT symbol, decision, thesis FROM decision_journal_entry") == [
+        ("SCHB", "buy", "Own the whole market.")
+    ]
+
+
+def test_fully_legacy_database_is_repaired_for_every_score_column(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy.db"
+    _make_legacy_database(db_path)
+
+    conn = connect(db_path)
+
+    assert EXPECTED_NULLABLE <= _nullable_columns(conn)
+    _insert_unscored_fund(conn)
+
+
+def test_repaired_database_still_requires_role_ai_score_and_explanation(tmp_path: Path) -> None:
+    """Relaxing the score columns must not relax the ones always known."""
+    db_path = tmp_path / "post6.db"
+    _make_legacy_database(db_path, POST_ISSUE_6_ETF_SCORE_DDL)
+
+    conn = connect(db_path)
+
+    # `symbol` is a TEXT PRIMARY KEY, which SQLite does not itself mark NOT
+    # NULL, so it is expected in this set and is not a score column.
+    assert _nullable_columns(conn) == EXPECTED_NULLABLE | {"symbol"}
+    assert not {"role", "ai_score", "explanation"} & _nullable_columns(conn)
+
+
+def test_post_issue_6_repair_is_idempotent(tmp_path: Path) -> None:
+    db_path = tmp_path / "post6.db"
+    _make_legacy_database(db_path, POST_ISSUE_6_ETF_SCORE_DDL)
+    connect(db_path).close()
+
+    conn = connect(db_path)
+    _insert_unscored_fund(conn)
+    conn.close()
+
+    # A third open must not drop the row the second one wrote.
+    reopened = connect(db_path)
+    assert _rows(reopened, "SELECT symbol FROM etf_score") == [("CCC",)]

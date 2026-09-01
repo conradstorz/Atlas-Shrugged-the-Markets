@@ -206,7 +206,8 @@ def test_seed_universe_itot_and_vti_share_the_same_diversification_treatment(tmp
 def test_excluding_diversification_reweights_rather_than_substitutes(tmp_path: Path) -> None:
     """Three scored components must spend the same 80-point budget as four.
 
-    Both funds have AI 8, resilience 7 and cost 9 (a 0.10% expense ratio).
+    Both funds have AI 8, resilience 7 (Foundation baseline, 10% IT exposure
+    being below the erosion threshold) and cost 9 (a 0.10% expense ratio).
     MEASURED also has a 1,000-holding file, worth breadth 8 — exactly the mean
     of the other three — so if the budget is renormalized correctly the two
     funds land on the same number:
@@ -215,8 +216,8 @@ def test_excluding_diversification_reweights_rather_than_substitutes(tmp_path: P
         four components:  32 * (80 / 40) + 20 = 84
     """
     conn = connect(tmp_path / "atlas.db")
-    _add_etf(conn, "UNMEASURED", "Total broad market", expense="0.10%")
-    _add_etf(conn, "MEASURED", "Total broad market", expense="0.10%")
+    _add_etf(conn, "UNMEASURED", "Total broad market", expense="0.10%", it_exposure="10%")
+    _add_etf(conn, "MEASURED", "Total broad market", expense="0.10%", it_exposure="10%")
     _add_holdings_file(conn, "MEASURED", 1000)
 
     by_symbol = {score.symbol: score for score in score_all(conn)}
@@ -240,6 +241,11 @@ def test_a_broader_fund_outscores_a_narrower_one_with_the_same_facts(tmp_path: P
 
     assert by_symbol["BROAD"].diversification_score == 10
     assert by_symbol["TIGHT"].diversification_score == 0
+    # Assert both are scored before comparing them: `None > int` raises
+    # TypeError, which would report a scoring regression as a crash instead of
+    # a failed assertion.
+    assert by_symbol["BROAD"].overall_score is not None
+    assert by_symbol["TIGHT"].overall_score is not None
     assert by_symbol["BROAD"].overall_score > by_symbol["TIGHT"].overall_score
 
 
@@ -257,8 +263,11 @@ def test_explanation_states_the_measured_basis_and_count(tmp_path: Path) -> None
 
 
 def test_explanation_says_diversification_was_excluded_and_how_to_fix_it(tmp_path: Path) -> None:
+    # The expense ratio keeps the fund scorable, so the explanation is the
+    # per-component one rather than the "not scored at all" one. A fund with no
+    # measurable component anywhere is covered separately below.
     conn = connect(tmp_path / "atlas.db")
-    _add_etf(conn, "BND", "Treasury bond fund")
+    _add_etf(conn, "BND", "Treasury bond fund", expense="0.03%")
 
     score = next(item for item in score_all(conn) if item.symbol == "BND")
 
@@ -297,3 +306,65 @@ def test_resilience_erodes_with_real_it_exposure(tmp_path: Path) -> None:
     assert by_symbol["LOWIT"].resilience_score == 7
     assert by_symbol["HIGHIT"].resilience_score == 4
     assert by_symbol["HIGHIT"].resilience_score < by_symbol["LOWIT"].resilience_score
+
+
+# --- issue #10: cost and resilience stop flattering missing data --------------
+
+def test_itot_and_vti_without_any_evidence_are_both_unscored(tmp_path: Path) -> None:
+    """THE regression test for issue #10 — the ITOT/VTI case.
+
+    Two identical total-market funds with no expense ratio, no
+    information-technology exposure and no imported holdings file. Every
+    data-grounded component is therefore unmeasurable, and the only thing left
+    is the AI keyword heuristic. They must produce the same result, and that
+    result must be *no score at all* rather than a number assembled from
+    fallbacks.
+    """
+    conn = connect(tmp_path / "atlas.db")
+    _add_etf(conn, "ITOT", "Total U.S. stock market", MEGA_CAPS)
+    _add_etf(conn, "VTI", "Total U.S. stock market", [])
+
+    by_symbol = {score.symbol: score for score in score_all(conn)}
+    itot, vti = by_symbol["ITOT"], by_symbol["VTI"]
+
+    assert itot.overall_score is None
+    assert vti.overall_score is None
+    assert (itot.overall_score, itot.cost_score, itot.resilience_score,
+            itot.diversification_score) == (
+        vti.overall_score, vti.cost_score, vti.resilience_score, vti.diversification_score
+    )
+
+
+def _import_partial_holdings(conn: sqlite3.Connection, symbol: str) -> None:
+    """Give `symbol` an imported file whose weights cover far too little."""
+    conn.execute(
+        "INSERT INTO etf (symbol, description) VALUES (?, ?) ON CONFLICT(symbol) DO NOTHING",
+        (symbol, f"{symbol} test fund"),
+    )
+    for rank, (holding, weight) in enumerate([("AAA", 20.0), ("BBB", 15.0)], start=1):
+        conn.execute(
+            "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, weight, source) "
+            "VALUES (?, ?, ?, ?, 'holdings_file')",
+            (symbol, holding, rank, weight),
+        )
+    conn.commit()
+
+
+def test_explanation_does_not_tell_a_partial_importer_they_imported_nothing(tmp_path: Path) -> None:
+    """The unmeasured-diversification clause must describe the unmet condition.
+
+    `measured_diversification` returns None both when no holdings file exists
+    and when an imported one covers too little of the fund. Saying "no holdings
+    file imported" would send someone who imported a partial file to re-run a
+    command they already ran.
+    """
+    conn = connect(tmp_path / "atlas.db")
+    _import_partial_holdings(conn, "PARTIAL")  # 35% coverage, below the threshold
+
+    explanation = next(s for s in score_all(conn) if s.symbol == "PARTIAL").explanation
+
+    assert measured_diversification(conn, "PARTIAL") is None
+    assert f"{FULL_COVERAGE_THRESHOLD:g}%" in explanation
+    # It must not assert that nothing was imported, because something was.
+    assert "no full holdings file imported" not in explanation
+    assert "no imported holdings file" not in explanation

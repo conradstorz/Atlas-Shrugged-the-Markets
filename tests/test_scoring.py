@@ -12,7 +12,11 @@ def test_seed_universe_scores(tmp_path: Path) -> None:
     scores = score_all(conn)
     assert loaded > 0
     assert scores
-    assert all(0 <= score.overall_score <= 100 for score in scores)
+    # `overall_score` is None for a fund with no measurable component at all;
+    # every score that exists is still on the 0-100 scale.
+    assert all(
+        score.overall_score is None or 0 <= score.overall_score <= 100 for score in scores
+    )
 
 
 def test_top_ten_overlap(tmp_path: Path) -> None:
