@@ -32,19 +32,34 @@ def build_research_report(conn: sqlite3.Connection, portfolio_name: str | None =
         "",
         f"These scores are still {SCORER_VERSION} heuristic scores. They are useful for building the explainable workflow, not for pretending the model is finished.",
         "",
-        "Diversification is the measured breadth of a fund's holdings; a dash means it was not measured (no imported holdings file covering the whole fund) and the fund's remaining components were reweighted, so the gap neither helps nor hurts its score.",
+        "A dash means Atlas did not measure that component: cost needs a gross expense ratio, resilience needs an information-technology exposure figure, and diversification needs an imported holdings file covering the whole fund. An unmeasured component is excluded and the fund's remaining components share the same budget, so the gap neither helps nor hurts its score.",
+        "",
+        "A dash in the Score column means the fund has no overall score at all: none of those three components could be measured, and only the AI keyword heuristic remained. Atlas will not build a number out of that. Such funds are ranked last because there is no basis for ranking them anywhere, not because they scored badly.",
         "",
         "| Rank | ETF | Score | Role | AI | Resilience | Cost | Diversification |",
         "|---:|---|---:|---|---:|---:|---:|---:|",
     ]
 
+    # `score_all` ranks best-first with unscored funds last, so this table's
+    # rank column follows that order and never has to compare a None.
     scores = score_all(conn)
     for rank, score in enumerate(scores[:40], start=1):
         lines.append(
-            f"| {rank} | {score.symbol} | {score.overall_score} | {score.role} | "
-            f"{score.ai_score} | {score.resilience_score} | {score.cost_score} | "
+            f"| {rank} | {score.symbol} | {format_component(score.overall_score)} | {score.role} | "
+            f"{score.ai_score} | {format_component(score.resilience_score)} | "
+            f"{format_component(score.cost_score)} | "
             f"{format_component(score.diversification_score)} |"
         )
+
+    unscored = sum(1 for score in scores if score.overall_score is None)
+    if unscored:
+        lines.extend([
+            "",
+            f"{unscored} of the {len(scores)} funds in the universe have no overall score. "
+            "Adding a gross expense ratio or an information-technology exposure to a fund's "
+            "seed row, or importing its holdings file (`atlas import-holdings`), gives Atlas "
+            "something real to score it from.",
+        ])
 
     lines.extend([
         "",

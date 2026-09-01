@@ -19,6 +19,19 @@ ETF_HOLDING_COLUMNS = ("etf_symbol", "holding_symbol", "holding_name", "rank", "
 # order. Anything else is left untouched rather than rebuilt on a guess.
 LEGACY_ETF_HOLDING_KEY = ("etf_symbol", "holding_symbol")
 
+# The `etf_score` columns that must be nullable on the current schema. NULL in
+# any of them means "not measured", which is a fact about the fund's data
+# rather than a gap in the row. A database created before a given column was
+# relaxed still carries NOT NULL on it — `CREATE TABLE IF NOT EXISTS` cannot
+# drop a constraint — and would reject the scores `score_all` now produces, so
+# `_repair_etf_score_schema` rebuilds the table when it finds any of them still
+# NOT NULL. `diversification_score` was relaxed first; `overall_score`,
+# `resilience_score` and `cost_score` followed, so a database created between
+# the two changes is caught by the same check.
+NULLABLE_ETF_SCORE_COLUMNS = frozenset(
+    {"overall_score", "resilience_score", "cost_score", "diversification_score"}
+)
+
 # `etf_holding` under the widened key, used only to rebuild an existing table.
 # Keep it identical to the definition in `schema.sql`, which is what a fresh
 # database is created from; `tests/test_holding_key_migration.py` compares the
@@ -49,12 +62,21 @@ def connect(db_path: Path) -> sqlite3.Connection:
 
 
 def _repair_etf_score_schema(conn: sqlite3.Connection) -> None:
-    """Rebuild `etf_score` if it predates nullable diversification scores.
+    """Rebuild `etf_score` if any score column still predates nullability.
 
-    `diversification_score` is NULL when a fund's breadth could not be
-    measured. `CREATE TABLE IF NOT EXISTS` cannot relax the old NOT NULL
-    constraint on a database created before that change, so an existing local
-    database would reject those rows.
+    A score column is NULL when Atlas could not measure it: no gross expense
+    ratio (`cost_score`), no information-technology exposure
+    (`resilience_score`), no holdings file covering the whole fund
+    (`diversification_score`), or none of the three — in which case there is no
+    `overall_score` either. `CREATE TABLE IF NOT EXISTS` cannot relax a NOT
+    NULL constraint on a database that already exists, so without this repair
+    an investor's local database would reject exactly the rows that say "not
+    measured".
+
+    The check covers every column in `NULLABLE_ETF_SCORE_COLUMNS` rather than
+    only the first one to be relaxed, so a database created after
+    `diversification_score` became nullable but before the other three did is
+    repaired too.
 
     `etf_score` is a pure cache of derived values, recomputed from `etf` and
     `etf_holding` by `score_all`, so dropping it loses nothing. Never do this
@@ -66,7 +88,7 @@ def _repair_etf_score_schema(conn: sqlite3.Connection) -> None:
     if not columns:
         return  # No such table yet; the schema script has just created it.
     legacy = any(
-        column["name"] == "diversification_score" and column["notnull"] for column in columns
+        column["name"] in NULLABLE_ETF_SCORE_COLUMNS and column["notnull"] for column in columns
     )
     if not legacy:
         return

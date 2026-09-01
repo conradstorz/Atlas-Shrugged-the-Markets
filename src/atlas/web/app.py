@@ -123,7 +123,13 @@ def _page(title: str, body: str) -> str:
 def dashboard() -> str:
     conn = _conn()
     etf_count = conn.execute("SELECT COUNT(*) AS count FROM etf").fetchone()["count"]
-    score_count = len(read_scores(conn))
+    # "Scored" means a fund that actually got an overall score. A row in
+    # `etf_score` is not the same thing now that a fund with nothing
+    # measurable stores its role, its AI heuristic and a NULL score; counting
+    # rows would report the whole universe as scored.
+    scores = read_scores(conn)
+    score_count = sum(1 for score in scores if score.overall_score is not None)
+    unscored_count = len(scores) - score_count
     repeated = top_repeated_holdings(conn, limit=5)
     rows = "".join(
         f"<tr><td>{escape(row['holding_symbol'])}</td><td>{row['etf_count']}</td><td>{escape(row['etfs'])}</td></tr>"
@@ -133,7 +139,7 @@ def dashboard() -> str:
       <section class="card">
         <h2>Private Research Dashboard</h2>
         <p>Atlas is running locally and using the SQLite database at <code>{escape(str(DEFAULT_DB))}</code>.</p>
-        <p><strong>{etf_count}</strong> ETFs loaded. <strong>{score_count}</strong> ETFs scored.</p>
+        <p><strong>{etf_count}</strong> ETFs loaded. <strong>{score_count}</strong> ETFs scored, <strong>{unscored_count}</strong> with nothing measurable to score.</p>
       </section>
       <section class="card">
         <h2>Top Repeated Top-Ten Holdings</h2>
@@ -150,23 +156,37 @@ def dashboard() -> str:
 @app.get("/etfs", response_class=HTMLResponse)
 def etfs(limit: int = Query(50, ge=1, le=200)) -> str:
     conn = _conn()
-    scores = read_scores(conn)[:limit]
+    # `read_scores` orders unscored funds last, so slicing to `limit` shows the
+    # measurable funds first and never has to compare a None.
+    all_scores = read_scores(conn)
+    scores = all_scores[:limit]
     rows = "".join(
         "<tr>"
         f"<td>{idx}</td>"
         f"<td><a href='/etfs/{escape(score.symbol)}'>{escape(score.symbol)}</a></td>"
-        f"<td class='score'>{score.overall_score}</td>"
+        f"<td class='score'>{format_component(score.overall_score)}</td>"
         f"<td>{escape(score.role)}</td>"
         f"<td>{score.ai_score}</td>"
-        f"<td>{score.resilience_score}</td>"
-        f"<td>{score.cost_score}</td>"
+        f"<td>{format_component(score.resilience_score)}</td>"
+        f"<td>{format_component(score.cost_score)}</td>"
         f"<td>{format_component(score.diversification_score)}</td>"
         "</tr>"
         for idx, score in enumerate(scores, start=1)
     )
+    unscored = sum(1 for score in all_scores if score.overall_score is None)
+    unscored_note = (
+        f"<p class=\"muted\">{unscored} of {len(all_scores)} funds have no overall score at "
+        "all: none of cost, resilience or diversification could be measured, leaving only "
+        "the AI keyword heuristic, and Atlas will not build a number out of that. They are "
+        "ranked last because there is no basis for ranking them, not because they scored "
+        "badly.</p>"
+        if unscored
+        else ""
+    )
     body = f"""
       <h2>ETF Scores</h2>
-      <p class="muted">These are {SCORER_VERSION} heuristic scores. Every score remains explainable and subject to refinement. Diversification is the measured breadth of a fund's holdings; &mdash; means it was not measured &mdash; no imported holdings file covers the whole fund &mdash; so the component was excluded and the rest reweighted, leaving the gap neither helping nor hurting.</p>
+      <p class="muted">These are {SCORER_VERSION} heuristic scores. Every score remains explainable and subject to refinement. An &mdash; means Atlas did not measure that component: cost needs a gross expense ratio, resilience needs an information-technology exposure figure, and diversification needs an imported holdings file covering the whole fund. An unmeasured component is excluded and the rest share the same budget, so the gap neither helps nor hurts.</p>
+      {unscored_note}
       <table>
         <thead><tr><th>Rank</th><th>ETF</th><th>Score</th><th>Role</th><th>AI</th><th>Resilience</th><th>Cost</th><th>Diversification</th></tr></thead>
         <tbody>{rows}</tbody>
@@ -195,11 +215,19 @@ def etf_detail(symbol: str) -> str:
         "(<code>atlas import-holdings</code>) to use its real weights; a "
         "partial export sits alongside this list rather than replacing it.",
     }.get(holdings_weight_source(conn, symbol), "No holdings on file for this fund.")
+    # An unscored fund gets a sentence, not "None / 100" and not a dash sitting
+    # where a number is expected. The explanation below it says why.
+    headline = (
+        "<p><strong>Not scored</strong> &mdash; "
+        f"{escape(score.role)} (keyword heuristic)</p>"
+        if score.overall_score is None
+        else f"<p><strong>{score.overall_score}</strong> / 100 &mdash; {escape(score.role)}</p>"
+    )
     body = f"""
       <h2>{escape(symbol)} — {escape(row['description'])}</h2>
       <section class="card">
         <h3>Score</h3>
-        <p><strong>{score.overall_score}</strong> / 100 — {escape(score.role)}</p>
+        {headline}
         <p>{escape(score.explanation)}</p>
       </section>
       <section class="card">

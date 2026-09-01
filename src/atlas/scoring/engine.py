@@ -6,7 +6,7 @@ from math import log10
 
 from atlas.analytics.overlap import FULL_COVERAGE_THRESHOLD
 from atlas.parsing import parse_percent
-from atlas.scoring.model import ScoreBreakdown
+from atlas.scoring.model import ScoreBreakdown, score_sort_key
 
 CORE_TERMS = ("broad market", "total", "s&p 500", "large blend")
 DIVIDEND_TERMS = ("dividend", "income")
@@ -115,51 +115,58 @@ def score_etf(
     row: sqlite3.Row,
     diversification: DiversificationMeasure | None = None,
 ) -> ScoreBreakdown:
-    """Generate a transparent, partly data-grounded score for an ETF.
+    """Generate a transparent, fully data-grounded score for an ETF, or none.
 
-    Cost comes from the real expense ratio, resilience is eroded by the real
-    information-technology exposure, and diversification is the measured
-    breadth of the fund's imported holdings file (passed in via
-    ``diversification``). The AI signal is still a keyword heuristic; valuation
-    and drawdown data are not yet connected. Kept deliberately explainable
-    rather than final.
+    Every component is measured or excluded; none is substituted with a
+    stand-in value. Cost comes from the real gross expense ratio, resilience is
+    a role-based default eroded by the real information-technology exposure,
+    and diversification is the measured breadth of the fund's imported holdings
+    file (passed in via ``diversification``). Any of the three is ``None`` when
+    its input is absent, and the same fixed :data:`COMPONENT_BUDGET` is then
+    shared by the components that remain, so missing data neither rewards nor
+    punishes a fund. The AI signal remains a keyword heuristic; valuation and
+    drawdown data are not yet connected.
 
-    ``diversification`` is ``None`` when breadth could not be measured. That
-    component is then excluded and the same :data:`COMPONENT_BUDGET` is shared
-    by the components that remain, so a fund with no holdings file is neither
-    rewarded nor punished for the gap. There is no role-based diversification
-    default: a guess dressed as a measurement is the defect this design
-    removes.
+    **A fund with no grounded component at all has no overall score**:
+    ``overall_score`` is ``None``. The base of 20 plus a single keyword-derived
+    component would produce a confident-looking number from nothing the data
+    supports — a guess with a number on it, which is exactly what an investor
+    would read as a measurement. ``role`` and ``ai_score`` are still reported,
+    because they remain worth showing, and the explanation says plainly that no
+    score was produced and what data would produce one.
     """
     symbol = row["symbol"]
     text = f"{row['description']} {row['category']}".lower()
     expense = parse_percent(row["gross_expense_ratio"])
     tech = parse_percent(row["information_technology_exposure"])
 
+    # The role keyword defaults still seed resilience. They are the starting
+    # point for the erosion below, not a score in themselves: the value only
+    # reaches the breakdown once real IT-exposure data has acted on it.
     role = "Satellite"
     ai_score = 4
-    resilience_score = 5
+    resilience_baseline = 5
 
     if any(term in text for term in BOND_TERMS):
         role = "Defensive"
         ai_score = 1
-        resilience_score = 9
+        resilience_baseline = 9
     elif any(term in text for term in DIVIDEND_TERMS):
         role = "Quality Income"
         ai_score = 5
-        resilience_score = 8
+        resilience_baseline = 8
     elif any(term in text for term in VALUE_TERMS):
         role = "Value / Fundamental"
         ai_score = 6
-        resilience_score = 8
+        resilience_baseline = 8
     elif any(term in text for term in CORE_TERMS):
         role = "Foundation"
         ai_score = 8
-        resilience_score = 7
+        resilience_baseline = 7
     elif any(term in text for term in SECTOR_TERMS):
         role = "Thematic Satellite"
         ai_score = 8 if "technology" in text or "semiconductor" in text else 5
-        resilience_score = 3 if ai_score >= 8 else 5
+        resilience_baseline = 3 if ai_score >= 8 else 5
 
     # AI signal is nudged up by real information-technology concentration.
     if tech is not None:
@@ -170,11 +177,26 @@ def score_etf(
 
     # Resilience erodes with real IT concentration: every 10 percentage points
     # of technology exposure above 20% costs one point of resilience.
-    if tech is not None and tech > 20:
-        resilience_score = max(1, resilience_score - round((tech - 20) / 10))
+    #
+    # The erosion can only ever fire where the figure exists, so reporting the
+    # un-eroded role default for a fund with no IT exposure on file silently
+    # asserted "this fund is not technology-concentrated" — an opinion with no
+    # evidence behind it, which flattered precisely the funds Atlas knows least
+    # about. Unknown IT exposure now means no resilience score.
+    resilience_score: int | None
+    if tech is None:
+        resilience_score = None
+    elif tech > 20:
+        resilience_score = max(1, resilience_baseline - round((tech - 20) / 10))
+    else:
+        resilience_score = resilience_baseline
 
+    # Cost is the real expense ratio or nothing. The former `cost_score = 6`
+    # fallback was a mid-scale invention that punished a genuinely cheap fund
+    # whose ratio Atlas happened to lack and flattered an expensive one.
+    cost_score: int | None
     if expense is None:
-        cost_score = 6
+        cost_score = None
     elif expense <= 0.05:
         cost_score = 10
     elif expense <= 0.15:
@@ -186,33 +208,40 @@ def score_etf(
     else:
         cost_score = 3
 
-    # Renormalize over however many components were actually scored, rather
-    # than filling the diversification slot with a value nothing measured.
-    components = [ai_score, resilience_score, cost_score]
-    if diversification is not None:
-        components.append(diversification.score)
-    weight_per_point = COMPONENT_BUDGET / (len(components) * COMPONENT_MAX)
-    overall = round(sum(components) * weight_per_point + 20)
-    overall = max(0, min(100, overall))
+    diversification_score = None if diversification is None else diversification.score
 
-    if diversification is None:
-        diversification_clause = (
-            "diversification not scored (no full holdings file imported; run "
-            "atlas import-holdings), so the remaining three components share "
-            "the same score budget"
-        )
+    # Renormalize over however many components were actually measured, rather
+    # than filling an empty slot with a value nothing measured.
+    #
+    # Only these three count as grounded: each rests on a figure about this
+    # particular fund. `ai_score` is deliberately excluded from the test —
+    # it is keyword-matched from the description, which every fund has, so its
+    # presence is evidence of nothing. When no grounded component survives, the
+    # AI heuristic is all that is left and no overall score is produced at all.
+    grounded = [
+        score
+        for score in (resilience_score, cost_score, diversification_score)
+        if score is not None
+    ]
+    overall: int | None
+    if not grounded:
+        overall = None
     else:
-        diversification_clause = (
-            f"diversification={diversification.score}/10 (breadth: "
-            f"{diversification.holdings_count:,} holdings from imported file "
-            f"covering {diversification.weight_total:.1f}% of the fund)"
-        )
-    explanation = (
-        f"Role={role}; AI={ai_score}/10; resilience={resilience_score}/10; "
-        f"{diversification_clause}; cost={cost_score}/10. Cost uses the real "
-        "expense ratio and resilience reflects real information-technology "
-        "concentration; AI remains heuristic and valuation/drawdown data are "
-        "not yet connected."
+        components = [ai_score, *grounded]
+        weight_per_point = COMPONENT_BUDGET / (len(components) * COMPONENT_MAX)
+        overall = max(0, min(100, round(sum(components) * weight_per_point + 20)))
+
+    explanation = _explain(
+        role=role,
+        ai_score=ai_score,
+        resilience_score=resilience_score,
+        resilience_baseline=resilience_baseline,
+        tech=tech,
+        cost_score=cost_score,
+        expense_text=row["gross_expense_ratio"],
+        diversification=diversification,
+        overall=overall,
+        scored_component_count=len(grounded) + 1,
     )
     return ScoreBreakdown(
         symbol=symbol,
@@ -221,8 +250,85 @@ def score_etf(
         ai_score=ai_score,
         resilience_score=resilience_score,
         cost_score=cost_score,
-        diversification_score=None if diversification is None else diversification.score,
+        diversification_score=diversification_score,
         explanation=explanation,
+    )
+
+
+def _explain(
+    *,
+    role: str,
+    ai_score: int,
+    resilience_score: int | None,
+    resilience_baseline: int,
+    tech: float | None,
+    cost_score: int | None,
+    expense_text: str | None,
+    diversification: DiversificationMeasure | None,
+    overall: int | None,
+    scored_component_count: int,
+) -> str:
+    """Write a score's own rationale, component by component.
+
+    The Constitution requires a score to decompose into its components, their
+    weights, the raw inputs behind them and a rationale (Article IV), and
+    requires an opinion to be tied to evidence or to an explicit assumption
+    (Article VIII). So every component states either its value *and the raw
+    figure it came from*, or that it was not scored *and why*. A fund with no
+    overall score says so outright and names the data that would produce one,
+    rather than reporting a number nothing supports.
+    """
+    if overall is None:
+        return (
+            "Not scored: no expense ratio, information-technology exposure, or "
+            f"imported holdings file. Role={role} and AI={ai_score}/10 are keyword "
+            "heuristics only. A gross expense ratio, an information-technology "
+            "exposure figure, or a holdings file covering the whole fund "
+            "(atlas import-holdings) would each produce a score."
+        )
+
+    if resilience_score is None:
+        resilience_clause = (
+            "resilience not scored (no information-technology exposure on file, so "
+            f"the {role} baseline of {resilience_baseline}/10 could not be tested "
+            "against real data)"
+        )
+    elif tech is not None and tech > 20:
+        resilience_clause = (
+            f"resilience={resilience_score}/10 ({role} baseline {resilience_baseline}/10 "
+            f"eroded by {tech:g}% information-technology exposure)"
+        )
+    else:
+        resilience_clause = (
+            f"resilience={resilience_score}/10 ({role} baseline, undisturbed by "
+            f"{tech:g}% information-technology exposure)"
+        )
+
+    if diversification is None:
+        diversification_clause = (
+            "diversification not scored (no full holdings file imported; run "
+            "atlas import-holdings), so the remaining components share "
+            "the same score budget"
+        )
+    else:
+        diversification_clause = (
+            f"diversification={diversification.score}/10 (breadth: "
+            f"{diversification.holdings_count:,} holdings from imported file "
+            f"covering {diversification.weight_total:.1f}% of the fund)"
+        )
+
+    if cost_score is None:
+        cost_clause = "cost not scored (no gross expense ratio on file)"
+    else:
+        cost_clause = f"cost={cost_score}/10 ({expense_text} gross expense ratio)"
+
+    return (
+        f"Role={role}; AI={ai_score}/10 (keyword heuristic); {resilience_clause}; "
+        f"{diversification_clause}; {cost_clause}. Overall {overall}/100: "
+        f"{scored_component_count} scored components share the "
+        f"{COMPONENT_BUDGET:g}-point budget above a base of 20; an unscored "
+        "component is excluded, never substituted. AI remains heuristic and "
+        "valuation/drawdown data are not yet connected."
     )
 
 
@@ -231,15 +337,21 @@ def read_scores(conn: sqlite3.Connection) -> list[ScoreBreakdown]:
 
     Reads the ``etf_score`` table (populated by :func:`score_all`) so read-only
     callers such as the web dashboard don't have to re-score and re-write on
-    every request. A NULL ``diversification_score`` is passed through as
-    ``None`` — the fund's breadth was not measured.
+    every request. Every NULL is passed through as ``None`` rather than
+    defaulted: an unmeasured component, or — for ``overall_score`` — a fund
+    with no data-grounded component to score at all.
+
+    Unscored funds sort last. SQLite orders NULL below every value, so a
+    plain ``DESC`` would already do it, but the ordering is stated explicitly
+    here because it is a deliberate decision (Atlas has no basis for ranking a
+    fund it could not score) rather than a property of the storage engine.
     """
     rows = conn.execute(
         """
         SELECT symbol, role, overall_score, ai_score, resilience_score,
                cost_score, diversification_score, explanation
         FROM etf_score
-        ORDER BY overall_score DESC, symbol
+        ORDER BY overall_score IS NULL, overall_score DESC, symbol
         """
     ).fetchall()
     return [
@@ -258,6 +370,12 @@ def read_scores(conn: sqlite3.Connection) -> list[ScoreBreakdown]:
 
 
 def score_all(conn: sqlite3.Connection) -> list[ScoreBreakdown]:
+    """Score every fund in ``etf``, persist the results, and rank them.
+
+    Returns the scores ranked best-first, with funds that could not be scored
+    at all last. ``None`` components and a ``None`` ``overall_score`` are
+    written to ``etf_score`` as SQL NULL, which is what those columns mean.
+    """
     rows = conn.execute("SELECT * FROM etf ORDER BY symbol").fetchall()
     scores = [
         score_etf(row, diversification=measured_diversification(conn, row["symbol"]))
@@ -291,4 +409,8 @@ def score_all(conn: sqlite3.Connection) -> list[ScoreBreakdown]:
             ),
         )
     conn.commit()
-    return sorted(scores, key=lambda item: item.overall_score, reverse=True)
+    # `score_sort_key` rather than `reverse=True`: an unscored fund's None
+    # cannot be compared with an int, and it belongs at the bottom of the
+    # ranking rather than wherever a comparison happens to put it. The sort is
+    # stable and the input is symbol-ordered, so ties keep symbol order.
+    return sorted(scores, key=lambda item: score_sort_key(item.overall_score))

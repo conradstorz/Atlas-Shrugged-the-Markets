@@ -29,15 +29,26 @@ CREATE TABLE IF NOT EXISTS etf_holding (
 
 CREATE TABLE IF NOT EXISTS etf_score (
     symbol TEXT PRIMARY KEY REFERENCES etf(symbol),
+    -- `role` and `ai_score` are keyword heuristics over the fund's description,
+    -- so they are always available and stay NOT NULL. Every other score is
+    -- nullable, and NULL always means the same thing: not measured, therefore
+    -- excluded from overall_score rather than substituted with a stand-in.
+    -- 0 is a real score meaning "as bad as this component gets", never a
+    -- sentinel for missing data.
     role TEXT NOT NULL,
-    overall_score INTEGER NOT NULL,
+    -- NULL means no data-grounded component could be measured for this fund
+    -- at all, leaving only the AI keyword heuristic, so no overall score was
+    -- produced. A number built from a base of 20 plus one keyword heuristic
+    -- would look like a measurement and be a guess.
+    overall_score INTEGER,
     ai_score INTEGER NOT NULL,
-    resilience_score INTEGER NOT NULL,
-    cost_score INTEGER NOT NULL,
-    -- NULL means "not measured": the fund has no imported holdings file
-    -- covering essentially the whole fund, so its breadth is unknown and the
-    -- component is excluded from overall_score rather than guessed at. 0 is a
-    -- real score meaning "extremely concentrated" and is not a sentinel.
+    -- NULL: no information-technology exposure on file, so the role-based
+    -- resilience baseline could not be eroded by real data.
+    resilience_score INTEGER,
+    -- NULL: no gross expense ratio on file.
+    cost_score INTEGER,
+    -- NULL: no imported holdings file covering essentially the whole fund, so
+    -- the fund's breadth is unknown.
     diversification_score INTEGER,
     explanation TEXT NOT NULL
 );
