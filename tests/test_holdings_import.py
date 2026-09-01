@@ -58,6 +58,14 @@ def test_schwab_na_symbol_row_skipped_and_excluded_from_total() -> None:
     assert total == pytest.approx(19.08)
 
 
+def test_schwab_blank_symbol_row_skipped_and_excluded_from_total() -> None:
+    holdings = _by_symbol(list(HoldingsFileProvider(SCHWAB).iter_holdings()))
+    assert "" not in holdings
+    total = sum(h.weight for h in holdings.values())
+    # Same total as the N/A test: the blank-symbol cash row's 0.20 is not counted.
+    assert total == pytest.approx(19.08)
+
+
 def test_schwab_duplicate_symbol_summed_preserving_first_seen_name() -> None:
     holdings = _by_symbol(list(HoldingsFileProvider(SCHWAB).iter_holdings()))
     assert holdings["AAPL"].weight == pytest.approx(7.03)  # 7.01 + 0.02
