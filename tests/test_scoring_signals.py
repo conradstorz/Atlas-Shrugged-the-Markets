@@ -1,47 +1,66 @@
 """Tests that ETF scores are grounded in real DB data, not fabricated constants.
 
-Diversification is derived from measured holdings overlap; resilience is eroded
-by the real parsed information-technology exposure.
+Diversification is the measured breadth of a fund's holdings, and is measured
+only where an imported holdings file covers essentially the whole fund;
+elsewhere it is excluded from the score rather than defaulted. Resilience is
+eroded by the real parsed information-technology exposure.
 """
 
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from atlas.db.database import connect, load_seed_universe
-from atlas.scoring.engine import measured_diversification, score_all
+from atlas.scoring.engine import (
+    FULL_COVERAGE_THRESHOLD,
+    breadth_score,
+    measured_diversification,
+    read_scores,
+    score_all,
+)
+
+SEED = Path("data/atlas_seed_universe.csv")
 
 
-# --- measured_diversification (pure function) --------------------------------
+# --- the breadth scale (pure function) ----------------------------------------
 
-def test_all_unique_holdings_score_max_diversification() -> None:
-    freq = {"X": 1, "Y": 1}
-    assert measured_diversification(["X", "Y"], freq) == 10
-
-
-def test_all_shared_holdings_score_min_diversification() -> None:
-    freq = {"X": 5, "Y": 3}
-    assert measured_diversification(["X", "Y"], freq) == 0
+@pytest.mark.parametrize(
+    ("holdings", "expected"),
+    [(10, 0), (30, 2), (100, 4), (500, 7), (1000, 8), (3000, 10)],
+)
+def test_breadth_scale_reference_points(holdings: int, expected: int) -> None:
+    assert breadth_score(holdings) == expected
 
 
-def test_half_shared_holdings_score_middle() -> None:
-    freq = {"X": 2, "Y": 1}
-    assert measured_diversification(["X", "Y"], freq) == 5
+def test_breadth_is_clamped_at_both_ends() -> None:
+    assert breadth_score(1) == 0  # below the floor
+    assert breadth_score(9) == 0
+    assert breadth_score(10_000) == 10  # above the ceiling
 
 
-def test_no_holdings_returns_none() -> None:
-    assert measured_diversification([], {}) is None
+def test_breadth_of_no_holdings_is_zero_not_an_error() -> None:
+    assert breadth_score(0) == 0
+    assert breadth_score(-5) == 0
 
 
-# --- integration through score_all -------------------------------------------
+# --- helpers ------------------------------------------------------------------
 
-def _add_etf(conn: sqlite3.Connection, symbol: str, description: str,
-             holdings: list[str], it_exposure: str = "") -> None:
+def _add_etf(
+    conn: sqlite3.Connection,
+    symbol: str,
+    description: str,
+    seed_holdings: list[str] | None = None,
+    expense: str = "",
+    it_exposure: str = "",
+) -> None:
+    """Insert a fund, optionally with unweighted seed select-list top-ten rows."""
     conn.execute(
-        "INSERT INTO etf (symbol, description, category, information_technology_exposure) "
-        "VALUES (?, ?, ?, ?)",
-        (symbol, description, "", it_exposure),
+        "INSERT INTO etf (symbol, description, category, gross_expense_ratio, "
+        "information_technology_exposure) VALUES (?, ?, ?, ?, ?)",
+        (symbol, description, "", expense, it_exposure),
     )
-    for rank, holding in enumerate(holdings, start=1):
+    for rank, holding in enumerate(seed_holdings or [], start=1):
         conn.execute(
             "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank) VALUES (?, ?, ?)",
             (symbol, holding, rank),
@@ -49,43 +68,67 @@ def _add_etf(conn: sqlite3.Connection, symbol: str, description: str,
     conn.commit()
 
 
-def test_unique_holdings_score_higher_diversification_than_crowded(tmp_path: Path) -> None:
+def _add_holdings_file(
+    conn: sqlite3.Connection, symbol: str, holdings_count: int, total_weight: float = 100.0
+) -> None:
+    """Attach ``holdings_count`` imported rows sharing ``total_weight`` percent."""
+    weight = total_weight / holdings_count
+    conn.executemany(
+        "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, weight, source) "
+        "VALUES (?, ?, ?, ?, 'holdings_file')",
+        [(symbol, f"{symbol}H{index:05d}", index, weight) for index in range(1, holdings_count + 1)],
+    )
+    conn.commit()
+
+
+# --- when is breadth measurable? ----------------------------------------------
+
+def test_full_imported_file_is_measured(tmp_path: Path) -> None:
     conn = connect(tmp_path / "atlas.db")
-    # X and Y are crowded (also held by E1/E2); P and Q are unique to UNIQ.
-    _add_etf(conn, "UNIQ", "Some fund", ["P", "Q"])
-    _add_etf(conn, "CROWD", "Some fund", ["X", "Y"])
-    _add_etf(conn, "E1", "Some fund", ["X"])
-    _add_etf(conn, "E2", "Some fund", ["Y"])
+    _add_etf(conn, "WIDE", "Total broad market")
+    _add_holdings_file(conn, "WIDE", 500)
 
-    by_symbol = {s.symbol: s for s in score_all(conn)}
+    measure = measured_diversification(conn, "WIDE")
 
-    assert by_symbol["UNIQ"].diversification_score == 10
-    assert by_symbol["CROWD"].diversification_score == 0
-    assert by_symbol["UNIQ"].diversification_score > by_symbol["CROWD"].diversification_score
+    assert measure is not None
+    assert measure.score == 7
+    assert measure.holdings_count == 500
+    assert measure.weight_total >= FULL_COVERAGE_THRESHOLD
 
 
-def test_resilience_erodes_with_real_it_exposure(tmp_path: Path) -> None:
+def test_narrow_full_imported_file_scores_low(tmp_path: Path) -> None:
     conn = connect(tmp_path / "atlas.db")
-    _add_etf(conn, "LOWIT", "Total broad market", [], it_exposure="10%")
-    _add_etf(conn, "HIGHIT", "Total broad market", [], it_exposure="50%")
+    _add_etf(conn, "NARROW", "Some sector fund")
+    _add_holdings_file(conn, "NARROW", 65)
 
-    by_symbol = {s.symbol: s for s in score_all(conn)}
+    measure = measured_diversification(conn, "NARROW")
 
-    # Same role (Foundation, baseline resilience 7). IT 50% -> 7 - (50-20)/10 = 4.
-    assert by_symbol["LOWIT"].resilience_score == 7
-    assert by_symbol["HIGHIT"].resilience_score == 4
-    assert by_symbol["HIGHIT"].resilience_score < by_symbol["LOWIT"].resilience_score
+    assert measure is not None
+    assert measure.score == 3
+    assert measure.holdings_count == 65
 
 
-def test_etf_without_holdings_keeps_role_based_diversification(tmp_path: Path) -> None:
+def test_partial_imported_file_is_not_measured(tmp_path: Path) -> None:
+    """A top-ten export is a slice of the fund, not evidence that it holds ten names."""
     conn = connect(tmp_path / "atlas.db")
-    _add_etf(conn, "BND", "Treasury bond fund", [])
+    _add_etf(conn, "PARTIAL", "Total broad market")
+    _add_holdings_file(conn, "PARTIAL", 10, total_weight=35.0)
 
-    score = next(s for s in score_all(conn) if s.symbol == "BND")
+    assert measured_diversification(conn, "PARTIAL") is None
 
-    # No parsed holdings -> measured diversification is undefined, role default kept.
-    assert score.role == "Defensive"
-    assert score.diversification_score == 7
+
+def test_seed_top_ten_rows_are_not_measured(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "atlas.db")
+    _add_etf(conn, "SEEDY", "Total broad market", ["A", "B", "C", "D", "E"])
+
+    assert measured_diversification(conn, "SEEDY") is None
+
+
+def test_fund_with_no_holdings_at_all_is_not_measured(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "atlas.db")
+    _add_etf(conn, "EMPTY", "Total broad market")
+
+    assert measured_diversification(conn, "EMPTY") is None
 
 
 # --- issue #6: absence of evidence must neither help nor hurt -----------------
@@ -123,9 +166,107 @@ def test_seed_universe_itot_and_vti_share_the_same_diversification_treatment(tmp
     diversification must be excluded from both scores.
     """
     conn = connect(tmp_path / "atlas.db")
-    load_seed_universe(conn, Path("data/atlas_seed_universe.csv"))
+    load_seed_universe(conn, SEED)
 
     by_symbol = {score.symbol: score for score in score_all(conn)}
 
     assert by_symbol["ITOT"].diversification_score is None
     assert by_symbol["VTI"].diversification_score is None
+
+
+# --- renormalizing the score budget -------------------------------------------
+
+def test_excluding_diversification_reweights_rather_than_substitutes(tmp_path: Path) -> None:
+    """Three scored components must spend the same 80-point budget as four.
+
+    Both funds have AI 8, resilience 7 and cost 9 (a 0.10% expense ratio).
+    MEASURED also has a 1,000-holding file, worth breadth 8 — exactly the mean
+    of the other three — so if the budget is renormalized correctly the two
+    funds land on the same number:
+
+        three components: 24 * (80 / 30) + 20 = 84
+        four components:  32 * (80 / 40) + 20 = 84
+    """
+    conn = connect(tmp_path / "atlas.db")
+    _add_etf(conn, "UNMEASURED", "Total broad market", expense="0.10%")
+    _add_etf(conn, "MEASURED", "Total broad market", expense="0.10%")
+    _add_holdings_file(conn, "MEASURED", 1000)
+
+    by_symbol = {score.symbol: score for score in score_all(conn)}
+
+    assert (by_symbol["UNMEASURED"].ai_score, by_symbol["UNMEASURED"].resilience_score) == (8, 7)
+    assert by_symbol["UNMEASURED"].cost_score == 9
+    assert by_symbol["UNMEASURED"].diversification_score is None
+    assert by_symbol["MEASURED"].diversification_score == 8
+    assert by_symbol["UNMEASURED"].overall_score == 84
+    assert by_symbol["MEASURED"].overall_score == 84
+
+
+def test_a_broader_fund_outscores_a_narrower_one_with_the_same_facts(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "atlas.db")
+    _add_etf(conn, "BROAD", "Total broad market", expense="0.10%")
+    _add_etf(conn, "TIGHT", "Total broad market", expense="0.10%")
+    _add_holdings_file(conn, "BROAD", 3000)
+    _add_holdings_file(conn, "TIGHT", 12)
+
+    by_symbol = {score.symbol: score for score in score_all(conn)}
+
+    assert by_symbol["BROAD"].diversification_score == 10
+    assert by_symbol["TIGHT"].diversification_score == 0
+    assert by_symbol["BROAD"].overall_score > by_symbol["TIGHT"].overall_score
+
+
+# --- the explanation must state its own basis (Constitution Article IV) -------
+
+def test_explanation_states_the_measured_basis_and_count(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "atlas.db")
+    _add_etf(conn, "WIDE", "Total broad market")
+    _add_holdings_file(conn, "WIDE", 1043)
+
+    score = next(item for item in score_all(conn) if item.symbol == "WIDE")
+
+    assert "diversification=8/10" in score.explanation
+    assert "1,043 holdings from imported file" in score.explanation
+
+
+def test_explanation_says_diversification_was_excluded_and_how_to_fix_it(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "atlas.db")
+    _add_etf(conn, "BND", "Treasury bond fund")
+
+    score = next(item for item in score_all(conn) if item.symbol == "BND")
+
+    assert score.role == "Defensive"
+    assert score.diversification_score is None
+    assert "diversification not scored" in score.explanation
+    assert "atlas import-holdings" in score.explanation
+    assert "share the same score budget" in score.explanation
+
+
+# --- persistence ---------------------------------------------------------------
+
+def test_read_scores_round_trips_an_unmeasured_diversification(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "atlas.db")
+    _add_etf(conn, "EMPTY", "Total broad market")
+    _add_etf(conn, "WIDE", "Total broad market")
+    _add_holdings_file(conn, "WIDE", 500)
+    score_all(conn)
+
+    by_symbol = {score.symbol: score for score in read_scores(conn)}
+
+    assert by_symbol["EMPTY"].diversification_score is None
+    assert by_symbol["WIDE"].diversification_score == 7
+
+
+# --- resilience ----------------------------------------------------------------
+
+def test_resilience_erodes_with_real_it_exposure(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "atlas.db")
+    _add_etf(conn, "LOWIT", "Total broad market", it_exposure="10%")
+    _add_etf(conn, "HIGHIT", "Total broad market", it_exposure="50%")
+
+    by_symbol = {score.symbol: score for score in score_all(conn)}
+
+    # Same role (Foundation, baseline resilience 7). IT 50% -> 7 - (50-20)/10 = 4.
+    assert by_symbol["LOWIT"].resilience_score == 7
+    assert by_symbol["HIGHIT"].resilience_score == 4
+    assert by_symbol["HIGHIT"].resilience_score < by_symbol["LOWIT"].resilience_score

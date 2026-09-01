@@ -17,7 +17,37 @@ def connect(db_path: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+    _repair_etf_score_schema(conn)
     return conn
+
+
+def _repair_etf_score_schema(conn: sqlite3.Connection) -> None:
+    """Rebuild `etf_score` if it predates nullable diversification scores.
+
+    `diversification_score` is NULL when a fund's breadth could not be
+    measured. `CREATE TABLE IF NOT EXISTS` cannot relax the old NOT NULL
+    constraint on a database created before that change, so an existing local
+    database would reject those rows.
+
+    `etf_score` is a pure cache of derived values, recomputed from `etf` and
+    `etf_holding` by `score_all`, so dropping it loses nothing. Never do this
+    to a table holding data the investor entered — `portfolio`,
+    `portfolio_position` and `decision_journal_entry` are typed in by hand and
+    are deliberately untouched here.
+    """
+    columns = conn.execute("PRAGMA table_info(etf_score)").fetchall()
+    if not columns:
+        return  # No such table yet; the schema script has just created it.
+    legacy = any(
+        column["name"] == "diversification_score" and column["notnull"] for column in columns
+    )
+    if not legacy:
+        return
+    conn.execute("DROP TABLE etf_score")
+    # Re-run the schema script: every other table already exists, so this
+    # recreates exactly the one table that was just dropped.
+    conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+    conn.commit()
 
 
 def load_seed_universe(conn: sqlite3.Connection, seed_path: Path) -> int:

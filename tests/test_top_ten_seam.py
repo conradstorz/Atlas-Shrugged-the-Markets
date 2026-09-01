@@ -3,10 +3,13 @@
 ``etf_holding`` holds two very different kinds of row: seed select-list rows
 (membership only, ``weight IS NULL``) and imported holdings-file rows (real
 weights, and potentially hundreds of them per fund). Every consumer whose
-output is *defined* as a top-ten — overlap, repeated holdings, the measured
-diversification signal, the web fund page — must see exactly ten names: the
-real top ten by weight when a holdings file has been imported, and the seed
-select-list top ten otherwise.
+output is *defined* as a top-ten — overlap, repeated holdings, the web fund
+page — must see exactly ten names: the real top ten by weight when a holdings
+file has been imported, and the seed select-list top ten otherwise.
+
+The diversification signal is deliberately on the other side of this seam: it
+measures how many names a fund holds in total, so it reads every imported row
+and must *not* be capped at ten. Both halves are asserted here.
 
 The regression these tests exist to prevent is this branch's own defect class
 in a new place: importing better data (real weights) producing a worse number —
@@ -20,7 +23,7 @@ from pathlib import Path
 
 from atlas.analytics.overlap import compare_etfs, top_repeated_holdings, top_ten_holdings
 from atlas.db.database import connect, load_fund_holdings, load_seed_universe
-from atlas.scoring.engine import _universe_holding_frequency, score_all
+from atlas.scoring.engine import score_all
 
 SEED = Path("data/atlas_seed_universe.csv")
 
@@ -139,20 +142,31 @@ def test_weighted_fund_contributes_only_its_top_ten_to_repeat_holdings(tmp_path:
     assert counts == {"H01": 2}
 
 
-def test_weighted_fund_contributes_only_its_top_ten_to_universe_frequency(tmp_path: Path) -> None:
+def test_diversification_measures_whole_file_breadth_not_the_top_ten(tmp_path: Path) -> None:
+    """The other side of the seam: breadth counts every imported row.
+
+    A fund holding forty names is broader than one holding ten, and the
+    diversification signal must see that difference. Capping it at the top ten
+    would score every fund in the universe as holding exactly ten names.
+    """
     conn = connect(tmp_path / "atlas.db")
-    _add_fund(conn, "FUNDA")
+    _add_fund(conn, "FORTY")
+    _add_fund(conn, "TEN")
     load_fund_holdings(
         conn,
-        "FUNDA",
-        _write_holdings_csv(
-            tmp_path / "a.csv", _thirty_holdings([f"H{i:02d}" for i in range(1, 11)], "T")
-        ),
+        "FORTY",
+        _write_holdings_csv(tmp_path / "forty.csv", [(f"F{i:02d}", 2.5) for i in range(1, 41)]),
+    )
+    load_fund_holdings(
+        conn,
+        "TEN",
+        _write_holdings_csv(tmp_path / "ten.csv", [(f"N{i:02d}", 10.0) for i in range(1, 11)]),
     )
 
-    freq = _universe_holding_frequency(conn)
+    by_symbol = {score.symbol: score for score in score_all(conn)}
 
-    assert set(freq) == {f"H{i:02d}" for i in range(1, 11)}
+    assert by_symbol["FORTY"].diversification_score == 2
+    assert by_symbol["TEN"].diversification_score == 0
 
 
 def test_compare_overlap_uses_real_top_tens_not_full_holdings(tmp_path: Path) -> None:
@@ -181,7 +195,9 @@ def test_score_does_not_change_merely_because_holdings_were_imported(tmp_path: P
 
     A fund whose imported top ten by weight equals its seed top ten must score
     exactly as it did before the import. Better data must not move a number the
-    better data does not actually change.
+    better data does not actually change. The imported file here is a partial
+    export (its weights sum to 80%), so it does not make the fund's breadth
+    measurable either — nothing about the fund's evidence has improved.
     """
     before_conn = connect(tmp_path / "before.db")
     load_seed_universe(before_conn, SEED)

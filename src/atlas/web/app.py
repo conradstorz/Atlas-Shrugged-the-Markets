@@ -13,7 +13,7 @@ from atlas.plugins.hello import HelloAtlasPlugin
 from atlas.db.database import connect, load_seed_universe
 from atlas.reports.markdown import build_research_report
 from atlas.scoring.engine import read_scores, score_all
-from atlas.scoring.model import SCORER_VERSION
+from atlas.scoring.model import SCORER_VERSION, format_component
 
 DEFAULT_DB = Path(".atlas/atlas.db")
 DEFAULT_SEED = Path("data/atlas_seed_universe.csv")
@@ -160,13 +160,13 @@ def etfs(limit: int = Query(50, ge=1, le=200)) -> str:
         f"<td>{score.ai_score}</td>"
         f"<td>{score.resilience_score}</td>"
         f"<td>{score.cost_score}</td>"
-        f"<td>{score.diversification_score}</td>"
+        f"<td>{format_component(score.diversification_score)}</td>"
         "</tr>"
         for idx, score in enumerate(scores, start=1)
     )
     body = f"""
       <h2>ETF Scores</h2>
-      <p class="muted">These are {SCORER_VERSION} heuristic scores. Every score remains explainable and subject to refinement.</p>
+      <p class="muted">These are {SCORER_VERSION} heuristic scores. Every score remains explainable and subject to refinement. Diversification is the measured breadth of a fund's holdings; &mdash; means it was not measured &mdash; no imported holdings file covers the whole fund &mdash; so the component was excluded and the rest reweighted, leaving the gap neither helping nor hurting.</p>
       <table>
         <thead><tr><th>Rank</th><th>ETF</th><th>Score</th><th>Role</th><th>AI</th><th>Resilience</th><th>Cost</th><th>Diversification</th></tr></thead>
         <tbody>{rows}</tbody>

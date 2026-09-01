@@ -15,7 +15,7 @@ from atlas.portfolio.analysis import combined_concentration, summarize_portfolio
 from atlas.portfolio.schwab import load_schwab_positions
 from atlas.reports.markdown import write_research_report
 from atlas.scoring.engine import score_all
-from atlas.scoring.model import SCORER_VERSION
+from atlas.scoring.model import SCORER_VERSION, format_component
 
 app = typer.Typer(help="Atlas private investment decision intelligence CLI.")
 console = Console()
@@ -62,7 +62,7 @@ def score_etfs(
             str(score.ai_score),
             str(score.resilience_score),
             str(score.cost_score),
-            str(score.diversification_score),
+            format_component(score.diversification_score),
         )
 
     console.print(table)
