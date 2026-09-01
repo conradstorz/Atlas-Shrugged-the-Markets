@@ -354,3 +354,32 @@ def test_partial_import_overlapping_the_seed_list_shortens_it(tmp_path: Path) ->
 
     assert top_ten_holdings(conn, "SCHB") == SCHB_SEED_TOP_TEN[3:]
     assert holdings_weight_source(conn, "SCHB") == "seed_top_ten"
+
+
+def test_unrecognized_source_rows_are_a_last_resort(tmp_path: Path) -> None:
+    """`etf_holding.source` has no CHECK constraint, so the rule must not trip on one.
+
+    A row written by a future source type — or by hand — is used only when the
+    fund has nothing the rule recognizes, and never mixed into a top ten drawn
+    from a source that it does.
+    """
+    conn = connect(tmp_path / "atlas.db")
+    _add_fund(conn, "ODD")
+    conn.execute(
+        "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, source) "
+        "VALUES ('ODD', 'HANDX', 1, 'hand_edited')"
+    )
+    conn.commit()
+    assert top_ten_holdings(conn, "ODD") == ["HANDX"]
+    assert holdings_weight_source(conn, "ODD") == "hand_edited"
+
+    for rank, holding in enumerate(["S01", "S02"], start=1):
+        conn.execute(
+            "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, source) "
+            "VALUES ('ODD', ?, ?, 'seed_top_ten')",
+            (holding, rank),
+        )
+    conn.commit()
+
+    assert top_ten_holdings(conn, "ODD") == ["S01", "S02"]
+    assert holdings_weight_source(conn, "ODD") == "seed_top_ten"
