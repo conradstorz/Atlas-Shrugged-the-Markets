@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 
-from atlas.exceptions import AtlasError
+from atlas.exceptions import AtlasDataError, AtlasError
 from atlas.providers.holdings_file import HoldingsFileProvider
 from atlas.providers.portfolio_files import PortfolioCsvProvider
 from atlas.providers.seed_universe import SeedUniverseProvider
@@ -362,3 +363,72 @@ def load_fund_holdings(conn: sqlite3.Connection, etf_symbol: str, path: Path) ->
         )
     conn.commit()
     return len(holdings)
+
+
+@dataclass(frozen=True)
+class ForgetFundResult:
+    """What `forget_fund` removed for one symbol, and what it deliberately left.
+
+    ``holdings_removed`` counts `etf_holding` rows across both sources
+    (`seed_top_ten` and `holdings_file`). ``portfolio_positions`` is the number
+    of `portfolio_position` rows still referencing the symbol after the fund
+    was forgotten — those are the investor's actual holdings, not derived from
+    the universe, and `forget_fund` never touches them; a nonzero count here is
+    how the caller learns the position survives.
+    """
+
+    symbol: str
+    holdings_removed: int
+    score_removed: bool
+    portfolio_positions: int
+
+
+def forget_fund(conn: sqlite3.Connection, symbol: str) -> ForgetFundResult:
+    """Remove a fund and everything Atlas derived from it: undo `load_fund_holdings`.
+
+    `load_fund_holdings` deliberately creates a minimal `etf` row for a symbol
+    outside the seed universe, so holdings can be imported for a fund the seed
+    select-list does not name. That is wanted, but it means a typo'd symbol
+    creates a permanent phantom fund with no way to remove it. `forget_fund` is
+    the undo: it deletes the symbol's `etf_holding` rows (both sources), its
+    `etf_score` row, and its `etf` row.
+
+    Deletes `etf_holding` before `etf` because `etf_holding.etf_symbol`
+    references `etf(symbol)` and `connect()` sets `PRAGMA foreign_keys = ON`;
+    deleting `etf` first would violate that constraint.
+
+    Never touches `portfolio_position`. Those rows are the investor's actual
+    holdings, typed in or imported from a broker export, and Atlas cannot
+    rebuild a single one of them — they are not derived from the universe at
+    all, unlike `etf_holding` and `etf_score`, which `forget_fund` treats as
+    fully re-importable or recomputable. The returned
+    :class:`ForgetFundResult` reports how many positions still reference the
+    symbol so the caller can tell the investor the position remains.
+
+    Raises :class:`~atlas.exceptions.AtlasDataError` if `symbol` has no `etf`
+    row, rather than pretending to succeed on a symbol with nothing to forget.
+    """
+    symbol = symbol.strip().upper()
+    exists = conn.execute("SELECT 1 FROM etf WHERE symbol = ?", (symbol,)).fetchone()
+    if exists is None:
+        raise AtlasDataError(f"{symbol} is not in the universe. Nothing to forget.")
+
+    holdings_removed = conn.execute(
+        "DELETE FROM etf_holding WHERE etf_symbol = ?", (symbol,)
+    ).rowcount
+    score_removed = (
+        conn.execute("DELETE FROM etf_score WHERE symbol = ?", (symbol,)).rowcount > 0
+    )
+    conn.execute("DELETE FROM etf WHERE symbol = ?", (symbol,))
+    portfolio_positions = int(
+        conn.execute(
+            "SELECT COUNT(*) AS c FROM portfolio_position WHERE symbol = ?", (symbol,)
+        ).fetchone()["c"]
+    )
+    conn.commit()
+    return ForgetFundResult(
+        symbol=symbol,
+        holdings_removed=holdings_removed,
+        score_removed=score_removed,
+        portfolio_positions=portfolio_positions,
+    )

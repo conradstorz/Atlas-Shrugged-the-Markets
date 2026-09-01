@@ -8,7 +8,13 @@ from rich.panel import Panel
 from rich.table import Table
 
 from atlas.analytics.overlap import compare_etfs, holdings_basis_label, top_repeated_holdings
-from atlas.db.database import connect, load_fund_holdings, load_portfolio_csv, load_seed_universe
+from atlas.db.database import (
+    connect,
+    forget_fund,
+    load_fund_holdings,
+    load_portfolio_csv,
+    load_seed_universe,
+)
 from atlas.exceptions import AtlasDataError
 from atlas.journal.service import add_journal_entry, list_journal_entries
 from atlas.portfolio.analysis import combined_concentration, summarize_portfolio, universe_coverage
@@ -180,9 +186,29 @@ def import_holdings(
     holdings_csv: Path = typer.Argument(..., help="Issuer fund holdings CSV export (with weights)."),
     db: Path = typer.Option(Path(".atlas/atlas.db"), help="SQLite database path."),
 ) -> None:
-    """Import an issuer fund-holdings CSV (with weights) for one ETF."""
+    """Import an issuer fund-holdings CSV (with weights) for one ETF.
+
+    An unknown symbol creates a new fund rather than failing; if that was a typo, undo it with `atlas forget-fund SYMBOL`.
+    """
     conn = connect(db)
     symbol = symbol.strip().upper()
+    # Checked before `load_fund_holdings` runs, which is what would insert the
+    # minimal `etf` row for an unfamiliar symbol — after that call this lookup
+    # would always find one and the warning could never fire.
+    # Test for a *seed-derived* row, not merely any row. `load_fund_holdings`
+    # creates a bare `etf` row (source NULL) for an unknown symbol, so checking
+    # for existence alone would warn on the first typo'd import and stay silent
+    # on every one after it — leaving the phantom to fade quietly into the
+    # universe, which is the failure this warning exists to prevent.
+    seed_derived = conn.execute(
+        "SELECT 1 FROM etf WHERE symbol = ? AND source IS NOT NULL", (symbol,)
+    ).fetchone()
+    if seed_derived is None:
+        console.print(
+            f"[yellow]Warning: {symbol} is not in the seed universe.\n"
+            "  Importing anyway and creating the fund.\n"
+            f"  If this was a typo: atlas forget-fund {symbol}[/yellow]"
+        )
     try:
         count = load_fund_holdings(conn, symbol, holdings_csv)
     except AtlasDataError as exc:
@@ -200,6 +226,42 @@ def import_holdings(
         (symbol,),
     ).fetchone()["total"]
     console.print(f"Imported {count} holdings for {symbol} ({total_weight:.2f}% of fund by weight).")
+
+
+@app.command("forget-fund")
+def forget_fund_command(
+    symbol: str = typer.Argument(..., help="ETF ticker to remove from the universe."),
+    db: Path = typer.Option(Path(".atlas/atlas.db"), help="SQLite database path."),
+) -> None:
+    """Remove a fund and everything derived from it, undoing a typo'd `import-holdings`.
+
+    Deletes the symbol's `etf_holding`, `etf_score` and `etf` rows. Never
+    touches `portfolio_position`: those are the investor's actual holdings and
+    are not derived from the universe, so if the symbol still has a position
+    this command says so rather than pretending the symbol is gone entirely.
+    """
+    conn = connect(db)
+    symbol = symbol.strip().upper()
+    try:
+        result = forget_fund(conn, symbol)
+    except AtlasDataError as exc:
+        # Same shape as `coverage` and `import-holdings`: a clean, actionable
+        # error rather than a Rich traceback with a local-variable dump.
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+    console.print(
+        f"Removed {result.symbol}: {result.holdings_removed} holdings, "
+        f"{1 if result.score_removed else 0} score, 1 universe entry."
+    )
+    if result.portfolio_positions:
+        if result.portfolio_positions == 1:
+            noun, verb, pronoun = "position", "references", "That position was"
+        else:
+            noun, verb, pronoun = "positions", "reference", "Those positions were"
+        console.print(
+            f"[yellow]{result.portfolio_positions} portfolio {noun} still {verb} "
+            f"{result.symbol}. {pronoun} not touched.[/yellow]"
+        )
 
 
 @app.command("coverage")
