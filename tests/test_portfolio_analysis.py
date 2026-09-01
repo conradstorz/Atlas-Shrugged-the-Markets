@@ -385,3 +385,35 @@ def test_weights_summing_under_100_still_leave_a_real_remainder(tmp_path: Path) 
     assert report.fund_coverage[0].modeled_share == pytest.approx(0.18)
     assert report.modeled_value == pytest.approx(1800.00)
     assert report.unmodeled_fund_value == pytest.approx(8200.00)
+
+
+def test_a_symbol_held_in_both_sources_is_not_double_counted(tmp_path: Path) -> None:
+    """`etf_holding` keys on `source`, so one company can hold two rows per fund.
+
+    Look-through reads only `source = 'holdings_file'` rows, because only those
+    carry a weight. The seed membership row for the same company must add
+    nothing: counting it would either raise the name's exposure or, if it were
+    ever given a weight, model the fund twice.
+    """
+    conn = connect(tmp_path / "atlas.db")
+    _add_weighted_holdings(conn, "XYZ", [("AAA", 60.00), ("BBB", 40.00)])
+    # AAA is also in the fund's published top-ten membership list.
+    _add_seed_holdings(conn, "XYZ", ["AAA", "CCC"])
+    _add_portfolio(conn, "P", [("XYZ", 10000, "etf")])
+
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) AS c FROM etf_holding WHERE etf_symbol = 'XYZ' AND holding_symbol = 'AAA'"
+        ).fetchone()["c"]
+        == 2
+    )
+
+    report = combined_concentration(conn, "P")
+
+    by_symbol = {line.symbol: line for line in report.lines}
+    assert by_symbol["AAA"].lookthrough_value == pytest.approx(6000.00)
+    assert by_symbol["BBB"].lookthrough_value == pytest.approx(4000.00)
+    # The seed-only name has no weight and is not modeled at all.
+    assert "CCC" not in by_symbol
+    assert report.modeled_value == pytest.approx(10000.00)
+    assert report.fund_coverage[0].modeled_share == pytest.approx(1.0)

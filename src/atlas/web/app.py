@@ -191,7 +191,9 @@ def etf_detail(symbol: str) -> str:
     holdings_basis = {
         "holdings_file": "Top ten by weight, from an imported holdings file.",
         "seed_top_ten": "Seed select-list top-ten membership; no weights. "
-        "Run <code>atlas import-holdings</code> for this fund to use its real weights.",
+        "Import a holdings file covering the whole fund "
+        "(<code>atlas import-holdings</code>) to use its real weights; a "
+        "partial export sits alongside this list rather than replacing it.",
     }.get(holdings_weight_source(conn, symbol), "No holdings on file for this fund.")
     body = f"""
       <h2>{escape(symbol)} — {escape(row['description'])}</h2>
@@ -225,7 +227,7 @@ def concentration(limit: int = Query(30, ge=1, le=100)) -> str:
     )
     body = f"""
       <h2>Repeated Holdings</h2>
-      <p class="muted">This is the first hidden-concentration warning system. It counts how many funds hold each name in their top ten &mdash; real top ten by weight where a holdings file has been imported, seed select-list top ten otherwise. It counts fund membership only and shows no dollar exposure; for dollars, see <code>atlas analyze-portfolio</code>.</p>
+      <p class="muted">This is the first hidden-concentration warning system. It counts how many funds hold each name in their top ten &mdash; real top ten by weight where a holdings file covering the whole fund has been imported, seed select-list top ten otherwise. It counts fund membership only and shows no dollar exposure; for dollars, see <code>atlas analyze-portfolio</code>.</p>
       <table><thead><tr><th>Holding</th><th>ETF Count</th><th>ETFs</th></tr></thead><tbody>{table_rows}</tbody></table>
     """
     return _page("Repeated Holdings", body)

@@ -21,7 +21,12 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from atlas.analytics.overlap import compare_etfs, top_repeated_holdings, top_ten_holdings
+from atlas.analytics.overlap import (
+    compare_etfs,
+    holdings_weight_source,
+    top_repeated_holdings,
+    top_ten_holdings,
+)
 from atlas.db.database import connect, load_fund_holdings, load_seed_universe
 from atlas.scoring.engine import score_all
 
@@ -56,6 +61,12 @@ def _thirty_holdings(top_ten: list[str], tail_prefix: str) -> list[tuple[str, fl
     rows += [(f"{tail_prefix}{index:02d}", 1.0) for index in range(1, 21)]
     return rows
 
+
+def _full_holdings(top_ten: list[str], tail_prefix: str) -> list[tuple[str, float]]:
+    """Ten heavy names plus twenty tail names, summing to 100% — a whole fund."""
+    rows = [(symbol, 7.0) for symbol in top_ten]
+    rows += [(f"{tail_prefix}{index:02d}", 1.5) for index in range(1, 21)]
+    return rows
 
 def _add_fund(conn: sqlite3.Connection, symbol: str) -> None:
     conn.execute("INSERT INTO etf (symbol, description) VALUES (?, ?)", (symbol, f"{symbol} test fund"))
@@ -238,3 +249,174 @@ def test_compare_overlap_unchanged_by_an_import_matching_the_seed_top_ten(tmp_pa
 
     assert after.jaccard_percent == before.jaccard_percent
     assert after.shared_symbols == before.shared_symbols
+
+
+# --- one source per top ten: a full file supersedes, a partial one does not ---
+
+
+def test_partial_import_does_not_supersede_the_seed_top_ten(tmp_path: Path) -> None:
+    """A five-row export is a slice of a fund, not its top ten.
+
+    Before this rule, the five imported rows took five of the ten slots and
+    seed rows filled the rest — a hybrid list labelled as an issuer file.
+    """
+    conn = connect(tmp_path / "atlas.db")
+    load_seed_universe(conn, SEED)
+    load_fund_holdings(
+        conn,
+        "SCHB",
+        _write_holdings_csv(tmp_path / "short.csv", [(f"P{index:02d}", 6.0) for index in range(1, 6)]),
+    )
+
+    assert top_ten_holdings(conn, "SCHB") == SCHB_SEED_TOP_TEN
+    assert holdings_weight_source(conn, "SCHB") == "seed_top_ten"
+
+
+def test_full_import_supersedes_the_seed_top_ten(tmp_path: Path) -> None:
+    """A file covering the whole fund is better evidence than the seed list."""
+    conn = connect(tmp_path / "atlas.db")
+    load_seed_universe(conn, SEED)
+    heaviest = [f"W{index:02d}" for index in range(1, 11)]
+    load_fund_holdings(
+        conn, "SCHB", _write_holdings_csv(tmp_path / "full.csv", _full_holdings(heaviest, "T"))
+    )
+
+    assert top_ten_holdings(conn, "SCHB") == heaviest
+    assert holdings_weight_source(conn, "SCHB") == "holdings_file"
+
+
+def test_partial_import_is_used_when_the_fund_has_no_seed_rows(tmp_path: Path) -> None:
+    """A fund outside the seed universe has nothing to fall back to."""
+    conn = connect(tmp_path / "atlas.db")
+    _add_fund(conn, "OUTSIDE")
+    load_fund_holdings(
+        conn,
+        "OUTSIDE",
+        _write_holdings_csv(tmp_path / "short.csv", [(f"P{index:02d}", 6.0) for index in range(1, 6)]),
+    )
+
+    assert top_ten_holdings(conn, "OUTSIDE") == [f"P{index:02d}" for index in range(1, 6)]
+    assert holdings_weight_source(conn, "OUTSIDE") == "holdings_file"
+
+
+def test_short_import_still_contributes_ten_names_to_repeat_holdings(tmp_path: Path) -> None:
+    """The concentration warning counts SCHB's ten seed names, not five imported ones."""
+    conn = connect(tmp_path / "atlas.db")
+    load_seed_universe(conn, SEED)
+    load_fund_holdings(
+        conn,
+        "SCHB",
+        _write_holdings_csv(tmp_path / "short.csv", [(f"P{index:02d}", 6.0) for index in range(1, 6)]),
+    )
+
+    schb_names = {
+        row["holding_symbol"]
+        for row in top_repeated_holdings(conn, limit=500)
+        if "SCHB" in row["etfs"].split(", ")
+    }
+    assert schb_names == set(SCHB_SEED_TOP_TEN)  # ten names, not the five imported ones
+
+
+def test_a_full_import_never_yields_a_hybrid_list(tmp_path: Path) -> None:
+    """Every name in a superseding top ten comes from the imported file."""
+    conn = connect(tmp_path / "atlas.db")
+    load_seed_universe(conn, SEED)
+    # Only six imported names, but they cover 96% of the fund, so the file is
+    # the whole fund and the seed list must not top it up to ten.
+    load_fund_holdings(
+        conn,
+        "SCHB",
+        _write_holdings_csv(tmp_path / "concentrated.csv", [(f"C{index:02d}", 16.0) for index in range(1, 7)]),
+    )
+
+    assert top_ten_holdings(conn, "SCHB") == [f"C{index:02d}" for index in range(1, 7)]
+    assert holdings_weight_source(conn, "SCHB") == "holdings_file"
+
+
+def test_partial_import_overlapping_the_seed_list_leaves_it_whole(tmp_path: Path) -> None:
+    """Issue #5's headline symptom, inverted and pinned.
+
+    A partial export of a fund's *largest* names names exactly the symbols the
+    seed top ten is made of. Under the old
+    ``PRIMARY KEY (etf_symbol, holding_symbol)`` those three imported rows took
+    three seed slots, and SCHB's top ten came back seven names long — a short
+    file shrinking a fund's top ten, which is the defect. ``source`` is now part
+    of the key, so the two kinds of row coexist and the seed list survives at
+    its full length.
+    """
+    conn = connect(tmp_path / "atlas.db")
+    load_seed_universe(conn, SEED)
+    load_fund_holdings(
+        conn,
+        "SCHB",
+        _write_holdings_csv(tmp_path / "overlap.csv", [(symbol, 6.0) for symbol in SCHB_SEED_TOP_TEN[:3]]),
+    )
+
+    assert top_ten_holdings(conn, "SCHB") == SCHB_SEED_TOP_TEN
+    assert holdings_weight_source(conn, "SCHB") == "seed_top_ten"
+
+    # Both kinds of row are present for the three overlapping symbols.
+    counts = {
+        row["source"]: row["c"]
+        for row in conn.execute(
+            "SELECT source, COUNT(*) AS c FROM etf_holding WHERE etf_symbol = 'SCHB' GROUP BY source"
+        )
+    }
+    assert counts == {"seed_top_ten": 10, "holdings_file": 3}
+
+
+def test_a_full_import_supersedes_without_consuming_the_seed_rows(tmp_path: Path) -> None:
+    """Supersession is a read-time choice; the seed rows stay on disk, untouched.
+
+    The imported file wins SCHB's top ten because it covers the whole fund, but
+    the seed membership list must still be there in full afterwards — deleting
+    a re-import later must not leave the fund with nothing.
+    """
+    conn = connect(tmp_path / "atlas.db")
+    load_seed_universe(conn, SEED)
+    # The heaviest names are the seed names themselves, so every seed row is a
+    # collision candidate under the old key.
+    load_fund_holdings(
+        conn,
+        "SCHB",
+        _write_holdings_csv(tmp_path / "full.csv", _full_holdings(SCHB_SEED_TOP_TEN, "T")),
+    )
+
+    assert top_ten_holdings(conn, "SCHB") == SCHB_SEED_TOP_TEN
+    assert holdings_weight_source(conn, "SCHB") == "holdings_file"
+
+    seed_rows = conn.execute(
+        "SELECT holding_symbol, weight FROM etf_holding "
+        "WHERE etf_symbol = 'SCHB' AND source = 'seed_top_ten' ORDER BY rank"
+    ).fetchall()
+    assert [row["holding_symbol"] for row in seed_rows] == SCHB_SEED_TOP_TEN
+    assert all(row["weight"] is None for row in seed_rows)
+
+
+def test_unrecognized_source_rows_are_a_last_resort(tmp_path: Path) -> None:
+    """`etf_holding.source` has no CHECK constraint, so the rule must not trip on one.
+
+    A row written by a future source type — or by hand — is used only when the
+    fund has nothing the rule recognizes, and never mixed into a top ten drawn
+    from a source that it does.
+    """
+    conn = connect(tmp_path / "atlas.db")
+    _add_fund(conn, "ODD")
+    conn.execute(
+        "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, source) "
+        "VALUES ('ODD', 'HANDX', 1, 'hand_edited')"
+    )
+    conn.commit()
+    assert top_ten_holdings(conn, "ODD") == ["HANDX"]
+    assert holdings_weight_source(conn, "ODD") == "hand_edited"
+
+    for rank, holding in enumerate(["S01", "S02"], start=1):
+        conn.execute(
+            "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, source) "
+            "VALUES ('ODD', ?, ?, 'seed_top_ten')",
+            (holding, rank),
+        )
+    conn.commit()
+
+    assert top_ten_holdings(conn, "ODD") == ["S01", "S02"]
+    assert holdings_weight_source(conn, "ODD") == "seed_top_ten"
