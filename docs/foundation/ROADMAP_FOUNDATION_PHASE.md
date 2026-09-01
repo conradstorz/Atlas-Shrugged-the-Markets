@@ -8,23 +8,31 @@
 - Preserve working CLI.
 - Keep current prototype commands intact.
 
-## v0.7 — Normalized Schema
+## v0.7 — Holdings Ingestion & Weighted Look-Through (delivered)
+
+- Add issuer holdings CSV ingestion with real weights.
+- Add exact weighted fund look-through.
+- Report funds without imported holdings as unmodeled rather than estimated.
+- Add coverage reporting at universe and portfolio level.
+- Implement provider interfaces.
+
+## v0.8 — Normalized Schema
 
 - Add `asset`, `fund`, `company`, and `theme` tables.
 - Add migration from prototype `etf` table.
 - Keep backward-compatible import commands.
 
-## v0.8 — Theme Engine
+## v0.9 — Theme Engine
 
 - Add economic theme taxonomy.
 - Add AI theme layers: compute, cloud, power, cooling, networking, automation, cybersecurity.
 - Attach seed ETF heuristics to themes.
 
-## v0.9 — Decision Model
+## v1.0 — Decision Model
 
 - Replace simple journal entries with formal decision, thesis, evidence, and change-mind-condition entities.
 
-## v1.0 — First Coherent Local Product
+## v1.1 — First Coherent Local Product
 
 - Private portfolio import.
 - ETF scoring.

@@ -11,20 +11,41 @@ INVESCO = Path("tests/fixtures/holdings_invesco.csv")
 # so it is a genuine case of "seed data present, then real data imported".
 DIVB_SEED_TOP_TEN = ["ADP", "IBM", "ACN", "JPM", "PAYX", "JNJ", "HPQ", "XOM", "ABBV", "CTSH"]
 
+# ILCB's seed_top_ten list (NVDA, AAPL, MSFT, AMZN, GOOGL, AVGO, GOOG, META,
+# TSLA, MU) shares five symbols with the Invesco holdings fixture below
+# (NVDA, AAPL, MSFT, AMZN, META). That overlap is what makes
+# test_imported_holdings_survive_reseed a direct proof rather than an
+# indirect one: re-seeding actually hits
+# ON CONFLICT(etf_symbol, holding_symbol) DO UPDATE SET source=excluded.source
+# for those five rows, instead of merely adding unrelated seed rows alongside
+# untouched holdings_file rows.
+ILCB_SEED_TOP_TEN = ["NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "AVGO", "GOOG", "META", "TSLA", "MU"]
+
 
 def test_imported_holdings_survive_reseed(tmp_path: Path) -> None:
     conn = connect(tmp_path / "atlas.db")
-    load_fund_holdings(conn, "DIVB", INVESCO)
+    load_fund_holdings(conn, "ILCB", INVESCO)
     load_seed_universe(conn, SEED)  # must not flip holdings_file rows back to seed_top_ten
 
     rows = conn.execute(
-        "SELECT holding_symbol, weight, source FROM etf_holding WHERE etf_symbol = 'DIVB' ORDER BY rank"
+        "SELECT holding_symbol, weight, source FROM etf_holding WHERE etf_symbol = 'ILCB' ORDER BY rank"
     ).fetchall()
     symbols = [r["holding_symbol"] for r in rows]
     assert symbols == ["NVDA", "AAPL", "MSFT", "AMZN", "META", "SH"]
     assert all(r["source"] == "holdings_file" for r in rows)
     assert rows[0]["weight"] == 9.50
     assert rows[-1]["weight"] == -1.20
+
+    # NVDA sits in both the imported holdings fixture and ILCB's seed
+    # top-ten list, so this row is the one whose ON CONFLICT resolution
+    # actually matters: assert directly that it kept its holdings_file
+    # source and its real weight rather than being silently relabeled
+    # seed_top_ten with a stale (missing) weight.
+    nvda_row = conn.execute(
+        "SELECT weight, source FROM etf_holding WHERE etf_symbol = 'ILCB' AND holding_symbol = 'NVDA'"
+    ).fetchone()
+    assert nvda_row["source"] == "holdings_file"
+    assert nvda_row["weight"] == 9.50
 
 
 def test_funds_without_imported_holdings_still_get_seed_top_ten(tmp_path: Path) -> None:

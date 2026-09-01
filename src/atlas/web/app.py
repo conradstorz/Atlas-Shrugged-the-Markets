@@ -17,7 +17,7 @@ from atlas.scoring.engine import read_scores, score_all
 DEFAULT_DB = Path(".atlas/atlas.db")
 DEFAULT_SEED = Path("data/atlas_seed_universe.csv")
 
-app = FastAPI(title="Atlas", version="0.7.0")
+app = FastAPI(title="Atlas", version="0.8.0")
 
 
 def _kernel_report() -> dict[str, object]:

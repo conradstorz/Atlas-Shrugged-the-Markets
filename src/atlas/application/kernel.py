@@ -8,7 +8,7 @@ from atlas.platform.logging import configure_logging, get_logger
 from atlas.platform.plugins import AtlasPlugin, PluginHost
 from atlas.platform.secrets import EnvironmentSecretProvider, SecretProvider
 
-ATLAS_VERSION = "0.7.0"
+ATLAS_VERSION = "0.8.0"
 
 
 @dataclass
