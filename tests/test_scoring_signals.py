@@ -241,6 +241,11 @@ def test_a_broader_fund_outscores_a_narrower_one_with_the_same_facts(tmp_path: P
 
     assert by_symbol["BROAD"].diversification_score == 10
     assert by_symbol["TIGHT"].diversification_score == 0
+    # Assert both are scored before comparing them: `None > int` raises
+    # TypeError, which would report a scoring regression as a crash instead of
+    # a failed assertion.
+    assert by_symbol["BROAD"].overall_score is not None
+    assert by_symbol["TIGHT"].overall_score is not None
     assert by_symbol["BROAD"].overall_score > by_symbol["TIGHT"].overall_score
 
 

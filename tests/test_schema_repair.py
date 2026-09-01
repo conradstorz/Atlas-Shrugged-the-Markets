@@ -21,7 +21,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from atlas.db.database import connect
+from atlas.db.database import NULLABLE_ETF_SCORE_COLUMNS, connect
 
 # The `etf_score` table as it was before any score column became nullable.
 LEGACY_ETF_SCORE_DDL = """
@@ -194,12 +194,10 @@ def test_repair_is_idempotent(tmp_path: Path) -> None:
 
 # --- issue #10: the other three score columns become nullable too -------------
 
-EXPECTED_NULLABLE = {
-    "overall_score",
-    "resilience_score",
-    "cost_score",
-    "diversification_score",
-}
+# Imported from the production constant rather than restated. A fifth column
+# relaxed one day should widen what these tests demand, not silently disagree
+# with the code and fail for the wrong reason.
+EXPECTED_NULLABLE = set(NULLABLE_ETF_SCORE_COLUMNS)
 
 
 def test_post_issue_6_database_is_repaired_for_the_remaining_columns(tmp_path: Path) -> None:

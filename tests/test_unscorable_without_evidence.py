@@ -28,6 +28,7 @@ from atlas.cli.main import app as cli_app
 from atlas.db.database import connect, load_seed_universe
 from atlas.reports.markdown import build_research_report
 from atlas.scoring.engine import read_scores, score_all
+from atlas.scoring.model import format_component, score_sort_key
 
 SEED = Path("data/atlas_seed_universe.csv")
 runner = CliRunner()
@@ -61,6 +62,29 @@ def _add_holdings_file(conn: sqlite3.Connection, symbol: str, holdings_count: in
 
 def _scored(conn: sqlite3.Connection) -> dict:
     return {score.symbol: score for score in score_all(conn)}
+
+
+# --- the two chokepoints every renderer and ranking depends on ----------------
+
+def test_format_component_renders_an_unmeasured_value_as_an_em_dash() -> None:
+    assert format_component(None) == "—"
+
+
+def test_format_component_renders_zero_as_zero_not_a_dash() -> None:
+    """0 is a real score, and the dash must never stand in for it."""
+    assert format_component(0) == "0"
+    assert format_component(7) == "7"
+
+
+def test_score_sort_key_orders_high_first_and_unscored_last() -> None:
+    scores = [None, 0, 84, None, 100, 7]
+
+    assert sorted(scores, key=score_sort_key) == [100, 84, 7, 0, None, None]
+
+
+def test_score_sort_key_puts_an_unscored_fund_below_a_zero() -> None:
+    """Unscored is not "worst"; it is unrankable, so it sits below everything."""
+    assert score_sort_key(None) > score_sort_key(0)
 
 
 # --- cost is the expense ratio or nothing -------------------------------------
