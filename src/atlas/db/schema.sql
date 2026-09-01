@@ -27,7 +27,11 @@ CREATE TABLE IF NOT EXISTS etf_score (
     ai_score INTEGER NOT NULL,
     resilience_score INTEGER NOT NULL,
     cost_score INTEGER NOT NULL,
-    diversification_score INTEGER NOT NULL,
+    -- NULL means "not measured": the fund has no imported holdings file
+    -- covering essentially the whole fund, so its breadth is unknown and the
+    -- component is excluded from overall_score rather than guessed at. 0 is a
+    -- real score meaning "extremely concentrated" and is not a sentinel.
+    diversification_score INTEGER,
     explanation TEXT NOT NULL
 );
 

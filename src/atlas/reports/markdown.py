@@ -7,7 +7,7 @@ from pathlib import Path
 from atlas.analytics.overlap import top_repeated_holdings
 from atlas.portfolio.analysis import combined_concentration, summarize_portfolio
 from atlas.scoring.engine import score_all
-from atlas.scoring.model import SCORER_VERSION
+from atlas.scoring.model import SCORER_VERSION, format_component
 
 
 def _money(value: float) -> str:
@@ -32,6 +32,8 @@ def build_research_report(conn: sqlite3.Connection, portfolio_name: str | None =
         "",
         f"These scores are still {SCORER_VERSION} heuristic scores. They are useful for building the explainable workflow, not for pretending the model is finished.",
         "",
+        "Diversification is the measured breadth of a fund's holdings; a dash means it was not measured (no imported holdings file covering the whole fund) and the fund's remaining components were reweighted, so the gap neither helps nor hurts its score.",
+        "",
         "| Rank | ETF | Score | Role | AI | Resilience | Cost | Diversification |",
         "|---:|---|---:|---|---:|---:|---:|---:|",
     ]
@@ -40,7 +42,8 @@ def build_research_report(conn: sqlite3.Connection, portfolio_name: str | None =
     for rank, score in enumerate(scores[:40], start=1):
         lines.append(
             f"| {rank} | {score.symbol} | {score.overall_score} | {score.role} | "
-            f"{score.ai_score} | {score.resilience_score} | {score.cost_score} | {score.diversification_score} |"
+            f"{score.ai_score} | {score.resilience_score} | {score.cost_score} | "
+            f"{format_component(score.diversification_score)} |"
         )
 
     lines.extend([

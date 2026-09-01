@@ -15,7 +15,7 @@ from atlas.portfolio.analysis import combined_concentration, summarize_portfolio
 from atlas.portfolio.schwab import load_schwab_positions
 from atlas.reports.markdown import write_research_report
 from atlas.scoring.engine import score_all
-from atlas.scoring.model import SCORER_VERSION
+from atlas.scoring.model import SCORER_VERSION, format_component
 
 app = typer.Typer(help="Atlas private investment decision intelligence CLI.")
 console = Console()
@@ -62,14 +62,17 @@ def score_etfs(
             str(score.ai_score),
             str(score.resilience_score),
             str(score.cost_score),
-            str(score.diversification_score),
+            format_component(score.diversification_score),
         )
 
     console.print(table)
     console.print(
-        "\nThis is still a heuristic scoring pass. Diversification is measured from each "
-        "fund's top ten — its real top ten by weight where `atlas import-holdings` has been "
-        "run, its seed select-list top ten otherwise. Valuation enrichment comes next."
+        "\nThis is still a heuristic scoring pass. Diversification is the measured breadth "
+        "of a fund's holdings, and is only measurable from an imported holdings file "
+        "covering essentially the whole fund. A dash means it was not measured: the "
+        "component was excluded and the fund's other components reweighted over the same "
+        "budget, so the gap neither helps nor hurts. Run `atlas import-holdings` to measure "
+        "it. Valuation enrichment comes next."
     )
 
 

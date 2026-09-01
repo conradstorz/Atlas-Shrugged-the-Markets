@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass
+from math import log10
 
-from atlas.analytics.overlap import TOP_TEN_CTE, holdings_weight_source, top_ten_holdings
+from atlas.analytics.overlap import holdings_weight_source
 from atlas.parsing import parse_percent
 from atlas.scoring.model import ScoreBreakdown
 
@@ -12,56 +14,116 @@ VALUE_TERMS = ("value", "fundamental")
 BOND_TERMS = ("bond", "treasury", "municipal", "fixed income")
 SECTOR_TERMS = ("technology", "semiconductor", "energy", "health care", "financial", "utilities")
 
+# --- Diversification: breadth where it can be measured, nothing where it can't
 
-def _universe_holding_frequency(conn: sqlite3.Connection) -> dict[str, int]:
-    """Map each holding to the number of ETFs whose top ten contains it.
+# Breadth is read on a log scale. The gap between a 30-holding fund and a
+# 300-holding fund matters far more to an investor than the gap between 2,500
+# and 2,800 holdings, which a linear count would treat as equally important.
+# BREADTH_FLOOR is a fund holding no more names than a top-ten list (0/10);
+# BREADTH_CEILING is total-market breadth (10/10) — a US total-market index
+# runs to roughly three thousand names.
+BREADTH_FLOOR = 10
+BREADTH_CEILING = 3000
 
-    Uses the shared top-ten rule (:data:`~atlas.analytics.overlap.TOP_TEN_CTE`)
-    rather than every ``etf_holding`` row, so a fund with an imported 300-row
-    holdings file contributes exactly ten names here, like every other fund.
+# Breadth is only measurable from a holdings file that covers essentially the
+# whole fund. An issuer's full holdings file sums to ~100% of net assets; a
+# top-ten-only export sums to ~30-40%. This threshold separates "the whole
+# fund" from "a partial export" using data already stored. A partial file means
+# breadth is unknown, not small.
+FULL_COVERAGE_THRESHOLD = 90.0
+
+# Points of the 0-100 scale shared by the scored components; the remaining 20
+# is the base every fund starts from. The budget is fixed, so a component that
+# cannot be measured is dropped and the same points are spread over the
+# components that remain — never substituted with a guess.
+COMPONENT_BUDGET = 80.0
+COMPONENT_MAX = 10
+
+
+@dataclass(frozen=True)
+class DiversificationMeasure:
+    """A fund's measured breadth, together with the evidence behind it.
+
+    ``holdings_count`` and ``weight_total`` travel with the score so the
+    explanation can state its own basis rather than asserting a number the
+    reader has to trust.
     """
-    rows = conn.execute(
-        TOP_TEN_CTE
-        + """
-        SELECT holding_symbol, COUNT(DISTINCT etf_symbol) AS df
-        FROM atlas_top_ten
-        GROUP BY holding_symbol
-        """
-    ).fetchall()
-    return {row["holding_symbol"]: row["df"] for row in rows}
+
+    score: int
+    holdings_count: int
+    weight_total: float
 
 
-def measured_diversification(holdings: list[str], freq: dict[str, int]) -> int | None:
-    """Score 0-10 for how much unique exposure an ETF's holdings add.
+def breadth_score(holdings_count: int) -> int:
+    """Score 0-10 for how many names a fund actually holds, on a log scale.
 
-    A holding held by only this ETF (document frequency <= 1) is "unique"; one
-    also held by other ETFs is "crowded". The score is the fraction of unique
-    holdings, so an ETF that just piles into the same widely-held names scores
-    low. Returns ``None`` when there are no parsed holdings to measure.
+    ``BREADTH_FLOOR`` holdings or fewer score 0, ``BREADTH_CEILING`` or more
+    score 10, and the interval between them is logarithmic. A count of zero or
+    less is not breadth at all and scores 0.
     """
-    if not holdings:
+    if holdings_count <= 0:
+        return 0
+    span = log10(BREADTH_CEILING) - log10(BREADTH_FLOOR)
+    raw = (log10(holdings_count) - log10(BREADTH_FLOOR)) / span * COMPONENT_MAX
+    return max(0, min(COMPONENT_MAX, round(raw)))
+
+
+def measured_diversification(
+    conn: sqlite3.Connection, etf_symbol: str
+) -> DiversificationMeasure | None:
+    """Measure a fund's diversification as the breadth of what it holds.
+
+    Returns ``None`` — meaning "not measured", never a stand-in value — unless
+    the fund's holdings come from an imported holdings file
+    (``source='holdings_file'``) whose weights total at least
+    :data:`FULL_COVERAGE_THRESHOLD` percent of the fund.
+
+    Seed rows are top-ten *membership*, not a holdings list, and a partial
+    issuer export is a slice of the fund. Counting either as breadth would
+    report every seed fund — including a total-market index — as holding ten
+    names, which is a worse lie than saying nothing.
+    """
+    symbol = etf_symbol.upper()
+    if holdings_weight_source(conn, symbol) != "holdings_file":
         return None
-    unique = sum(1 for holding in holdings if freq.get(holding, 0) <= 1)
-    return round(unique / len(holdings) * 10)
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS holdings_count, COALESCE(SUM(weight), 0.0) AS weight_total
+        FROM etf_holding
+        WHERE etf_symbol = ? AND source = 'holdings_file'
+        """,
+        (symbol,),
+    ).fetchone()
+    holdings_count = int(row["holdings_count"])
+    weight_total = float(row["weight_total"])
+    if holdings_count <= 0 or weight_total < FULL_COVERAGE_THRESHOLD:
+        return None
+    return DiversificationMeasure(
+        score=breadth_score(holdings_count),
+        holdings_count=holdings_count,
+        weight_total=weight_total,
+    )
 
 
 def score_etf(
     row: sqlite3.Row,
-    diversification_override: int | None = None,
-    holdings_source: str | None = None,
+    diversification: DiversificationMeasure | None = None,
 ) -> ScoreBreakdown:
     """Generate a transparent, partly data-grounded score for an ETF.
 
     Cost comes from the real expense ratio, resilience is eroded by the real
-    information-technology exposure, and diversification is measured from actual
-    top-ten holdings overlap (passed in via ``diversification_override``). The AI
-    signal is still a keyword heuristic; valuation and drawdown data are not yet
-    connected. Kept deliberately explainable rather than final.
+    information-technology exposure, and diversification is the measured
+    breadth of the fund's imported holdings file (passed in via
+    ``diversification``). The AI signal is still a keyword heuristic; valuation
+    and drawdown data are not yet connected. Kept deliberately explainable
+    rather than final.
 
-    ``holdings_source`` names where that top ten came from — ``'holdings_file'``
-    for a fund's real ten highest-weight holdings, ``'seed_top_ten'`` for the
-    seed select-list membership — so the explanation states its own basis
-    instead of leaving the reader to guess.
+    ``diversification`` is ``None`` when breadth could not be measured. That
+    component is then excluded and the same :data:`COMPONENT_BUDGET` is shared
+    by the components that remain, so a fund with no holdings file is neither
+    rewarded nor punished for the gap. There is no role-based diversification
+    default: a guess dressed as a measurement is the defect this design
+    removes.
     """
     symbol = row["symbol"]
     text = f"{row['description']} {row['category']}".lower()
@@ -71,33 +133,27 @@ def score_etf(
     role = "Satellite"
     ai_score = 4
     resilience_score = 5
-    diversification_score = 5
 
     if any(term in text for term in BOND_TERMS):
         role = "Defensive"
         ai_score = 1
         resilience_score = 9
-        diversification_score = 7
     elif any(term in text for term in DIVIDEND_TERMS):
         role = "Quality Income"
         ai_score = 5
         resilience_score = 8
-        diversification_score = 7
     elif any(term in text for term in VALUE_TERMS):
         role = "Value / Fundamental"
         ai_score = 6
         resilience_score = 8
-        diversification_score = 7
     elif any(term in text for term in CORE_TERMS):
         role = "Foundation"
         ai_score = 8
         resilience_score = 7
-        diversification_score = 9
     elif any(term in text for term in SECTOR_TERMS):
         role = "Thematic Satellite"
         ai_score = 8 if "technology" in text or "semiconductor" in text else 5
         resilience_score = 3 if ai_score >= 8 else 5
-        diversification_score = 3
 
     # AI signal is nudged up by real information-technology concentration.
     if tech is not None:
@@ -110,12 +166,6 @@ def score_etf(
     # of technology exposure above 20% costs one point of resilience.
     if tech is not None and tech > 20:
         resilience_score = max(1, resilience_score - round((tech - 20) / 10))
-
-    # Diversification is the MEASURED uniqueness of this ETF's holdings versus
-    # the rest of the universe. When we have no parsed holdings to measure
-    # (e.g. bond funds), keep the role-based default.
-    if diversification_override is not None:
-        diversification_score = diversification_override
 
     if expense is None:
         cost_score = 6
@@ -130,27 +180,33 @@ def score_etf(
     else:
         cost_score = 3
 
-    overall = round(
-        ai_score * 2.0
-        + resilience_score * 2.0
-        + diversification_score * 2.0
-        + cost_score * 2.0
-        + 20
-    )
+    # Renormalize over however many components were actually scored, rather
+    # than filling the diversification slot with a value nothing measured.
+    components = [ai_score, resilience_score, cost_score]
+    if diversification is not None:
+        components.append(diversification.score)
+    weight_per_point = COMPONENT_BUDGET / (len(components) * COMPONENT_MAX)
+    overall = round(sum(components) * weight_per_point + 20)
     overall = max(0, min(100, overall))
 
-    if diversification_override is None:
-        diversification_basis = "role-based default (no parsed holdings)"
-    elif holdings_source == "holdings_file":
-        diversification_basis = "measured from top-ten holdings overlap, top ten by imported weight"
+    if diversification is None:
+        diversification_clause = (
+            "diversification not scored (no full holdings file imported; run "
+            "atlas import-holdings), so the remaining three components share "
+            "the same score budget"
+        )
     else:
-        diversification_basis = "measured from top-ten holdings overlap, seed select-list top ten"
+        diversification_clause = (
+            f"diversification={diversification.score}/10 (breadth: "
+            f"{diversification.holdings_count:,} holdings from imported file "
+            f"covering {diversification.weight_total:.1f}% of the fund)"
+        )
     explanation = (
         f"Role={role}; AI={ai_score}/10; resilience={resilience_score}/10; "
-        f"diversification={diversification_score}/10 ({diversification_basis}); "
-        f"cost={cost_score}/10. Cost uses the real expense ratio and resilience "
-        "reflects real information-technology concentration; AI remains heuristic "
-        "and valuation/drawdown data are not yet connected."
+        f"{diversification_clause}; cost={cost_score}/10. Cost uses the real "
+        "expense ratio and resilience reflects real information-technology "
+        "concentration; AI remains heuristic and valuation/drawdown data are "
+        "not yet connected."
     )
     return ScoreBreakdown(
         symbol=symbol,
@@ -159,7 +215,7 @@ def score_etf(
         ai_score=ai_score,
         resilience_score=resilience_score,
         cost_score=cost_score,
-        diversification_score=diversification_score,
+        diversification_score=None if diversification is None else diversification.score,
         explanation=explanation,
     )
 
@@ -169,7 +225,8 @@ def read_scores(conn: sqlite3.Connection) -> list[ScoreBreakdown]:
 
     Reads the ``etf_score`` table (populated by :func:`score_all`) so read-only
     callers such as the web dashboard don't have to re-score and re-write on
-    every request.
+    every request. A NULL ``diversification_score`` is passed through as
+    ``None`` — the fund's breadth was not measured.
     """
     rows = conn.execute(
         """
@@ -195,19 +252,11 @@ def read_scores(conn: sqlite3.Connection) -> list[ScoreBreakdown]:
 
 
 def score_all(conn: sqlite3.Connection) -> list[ScoreBreakdown]:
-    freq = _universe_holding_frequency(conn)
     rows = conn.execute("SELECT * FROM etf ORDER BY symbol").fetchall()
-    scores = []
-    for row in rows:
-        holdings = top_ten_holdings(conn, row["symbol"])
-        override = measured_diversification(holdings, freq)
-        scores.append(
-            score_etf(
-                row,
-                diversification_override=override,
-                holdings_source=holdings_weight_source(conn, row["symbol"]),
-            )
-        )
+    scores = [
+        score_etf(row, diversification=measured_diversification(conn, row["symbol"]))
+        for row in rows
+    ]
     for score in scores:
         conn.execute(
             """
