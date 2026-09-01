@@ -6,7 +6,7 @@ so every Jaccard/count assertion can be verified by hand.
 
 from pathlib import Path
 
-from atlas.analytics.overlap import compare_etfs, top_repeated_holdings
+from atlas.analytics.overlap import compare_etfs, holdings_basis_label, top_repeated_holdings
 from atlas.db.database import connect
 
 
@@ -140,3 +140,17 @@ def test_overlap_basis_is_none_for_a_fund_with_no_holdings(tmp_path: Path) -> No
     # One side having nothing to compare is an empty comparison, not a
     # mismatched-basis warning: there is no second basis to mismatch.
     assert result.mixed_basis is False
+
+
+def test_basis_label_distinguishes_no_holdings_from_an_unknown_source() -> None:
+    """An unrecognized source must not read as "no holdings".
+
+    `etf_holding.source` has no CHECK constraint, so a future source type or a
+    hand-edited row is possible. Labelling it "no holdings" would assert
+    something false about a fund that plainly has holdings.
+    """
+    assert holdings_basis_label("holdings_file") == "imported holdings file"
+    assert holdings_basis_label("seed_top_ten") == "seed select-list"
+    assert holdings_basis_label(None) == "no holdings"
+    assert holdings_basis_label("some_future_source") == "unrecognized source 'some_future_source'"
+    assert holdings_basis_label("") == "unrecognized source ''"

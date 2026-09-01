@@ -54,8 +54,17 @@ HOLDINGS_BASIS_LABELS = {
 
 
 def holdings_basis_label(source: str | None) -> str:
-    """Describe a top ten's source in words the investor reads."""
-    return HOLDINGS_BASIS_LABELS.get(source or "", "no holdings")
+    """Describe a top ten's source in words the investor reads.
+
+    ``None`` means the fund has no holdings rows at all. An unrecognized
+    source is reported by name rather than folded into "no holdings":
+    ``etf_holding.source`` carries no CHECK constraint, so a future source
+    type or a hand-edited row would otherwise be labelled as having no
+    holdings while plainly having some.
+    """
+    if source is None:
+        return "no holdings"
+    return HOLDINGS_BASIS_LABELS.get(source, f"unrecognized source '{source}'")
 
 
 @dataclass(frozen=True)
