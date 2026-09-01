@@ -7,7 +7,7 @@ by the real parsed information-technology exposure.
 import sqlite3
 from pathlib import Path
 
-from atlas.db.database import connect
+from atlas.db.database import connect, load_seed_universe
 from atlas.scoring.engine import measured_diversification, score_all
 
 
@@ -86,3 +86,46 @@ def test_etf_without_holdings_keeps_role_based_diversification(tmp_path: Path) -
     # No parsed holdings -> measured diversification is undefined, role default kept.
     assert score.role == "Defensive"
     assert score.diversification_score == 7
+
+
+# --- issue #6: absence of evidence must neither help nor hurt -----------------
+
+MEGA_CAPS = ["NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "AVGO", "GOOG", "META", "TSLA", "MU"]
+
+
+def test_identical_funds_score_the_same_without_an_imported_holdings_file(tmp_path: Path) -> None:
+    """THE regression test for issue #6 — the ITOT/VTI case.
+
+    Two identical total-market funds, neither with an imported holdings file.
+    One happens to have seed top-ten rows; the other has none. Nothing about
+    the funds differs, so nothing about their scores may differ: missing data
+    must neither reward nor punish.
+    """
+    conn = connect(tmp_path / "atlas.db")
+    _add_etf(conn, "HASTEN", "Total U.S. stock market", MEGA_CAPS, it_exposure="35%")
+    _add_etf(conn, "NOTOPTEN", "Total U.S. stock market", [], it_exposure="35%")
+    # The same mega-caps sit in other funds' top tens, as they do in reality.
+    _add_etf(conn, "PEER1", "Large blend fund", MEGA_CAPS[:5])
+    _add_etf(conn, "PEER2", "Large blend fund", MEGA_CAPS[5:])
+
+    by_symbol = {score.symbol: score for score in score_all(conn)}
+
+    assert by_symbol["HASTEN"].diversification_score is None
+    assert by_symbol["NOTOPTEN"].diversification_score is None
+    assert by_symbol["HASTEN"].overall_score == by_symbol["NOTOPTEN"].overall_score
+
+
+def test_seed_universe_itot_and_vti_share_the_same_diversification_treatment(tmp_path: Path) -> None:
+    """The real reported pair: seed top-ten rows are not a breadth measurement.
+
+    ITOT carries seed top-ten rows and VTI carries none. Neither has an
+    imported holdings file, so neither fund's breadth is measurable and
+    diversification must be excluded from both scores.
+    """
+    conn = connect(tmp_path / "atlas.db")
+    load_seed_universe(conn, Path("data/atlas_seed_universe.csv"))
+
+    by_symbol = {score.symbol: score for score in score_all(conn)}
+
+    assert by_symbol["ITOT"].diversification_score is None
+    assert by_symbol["VTI"].diversification_score is None
