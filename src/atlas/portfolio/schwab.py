@@ -4,7 +4,7 @@ import csv
 import sqlite3
 from pathlib import Path
 
-from atlas.db.database import normalize_asset_type, parse_money
+from atlas.parsing import normalize_asset_type, parse_money
 
 CASH_ROW_LABEL = "Cash & Cash Investments"
 _SKIP_SYMBOLS = {"Positions Total"}

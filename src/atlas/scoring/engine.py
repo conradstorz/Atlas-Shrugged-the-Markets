@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import re
 import sqlite3
 
+from atlas.parsing import parse_percent
 from atlas.scoring.model import ScoreBreakdown
 
 CORE_TERMS = ("broad market", "total", "s&p 500", "large blend")
@@ -10,13 +10,6 @@ DIVIDEND_TERMS = ("dividend", "income")
 VALUE_TERMS = ("value", "fundamental")
 BOND_TERMS = ("bond", "treasury", "municipal", "fixed income")
 SECTOR_TERMS = ("technology", "semiconductor", "energy", "health care", "financial", "utilities")
-
-
-def _parse_percent(value: str | None) -> float | None:
-    if not value or value.strip() in {"--", ""}:
-        return None
-    match = re.search(r"-?\d+(?:\.\d+)?", value)
-    return float(match.group()) if match else None
 
 
 def _universe_holding_frequency(conn: sqlite3.Connection) -> dict[str, int]:
@@ -56,8 +49,8 @@ def score_etf(row: sqlite3.Row, diversification_override: int | None = None) -> 
     """
     symbol = row["symbol"]
     text = f"{row['description']} {row['category']}".lower()
-    expense = _parse_percent(row["gross_expense_ratio"])
-    tech = _parse_percent(row["information_technology_exposure"])
+    expense = parse_percent(row["gross_expense_ratio"])
+    tech = parse_percent(row["information_technology_exposure"])
 
     role = "Satellite"
     ai_score = 4
