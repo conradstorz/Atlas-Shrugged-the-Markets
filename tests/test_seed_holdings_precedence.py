@@ -1,3 +1,18 @@
+"""What re-seeding may and may not do to a fund that has imported holdings.
+
+``load_seed_universe`` runs on every ``atlas generate-report`` and on web-app
+startup, so it is the routine that gets the most chances to quietly destroy
+real data. It refreshes every fund's ``seed_top_ten`` rows — including funds
+that also have an imported holdings file — but it must never touch a
+``holdings_file`` row, and never relabel one as seed data with a stale weight
+still attached.
+
+The two sources now coexist for one fund: the seed rows are the fund's
+published top-ten membership and the imported rows are its real weights. See
+``atlas.analytics.overlap.TOP_TEN_CTE`` for which of the two a fund's top ten
+is actually drawn from.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -8,18 +23,19 @@ SEED = Path("data/atlas_seed_universe.csv")
 INVESCO = Path("tests/fixtures/holdings_invesco.csv")
 
 # DIVB carries a real ten-symbol seed_top_ten list in the seed universe CSV,
-# so it is a genuine case of "seed data present, then real data imported".
+# and shares none of those symbols with the Invesco holdings fixture, so it is
+# the clean "both sources, no collisions" case.
 DIVB_SEED_TOP_TEN = ["ADP", "IBM", "ACN", "JPM", "PAYX", "JNJ", "HPQ", "XOM", "ABBV", "CTSH"]
 
-# ILCB's seed_top_ten list (NVDA, AAPL, MSFT, AMZN, GOOGL, AVGO, GOOG, META,
-# TSLA, MU) shares five symbols with the Invesco holdings fixture below
-# (NVDA, AAPL, MSFT, AMZN, META). That overlap is what makes
+# ILCB's seed_top_ten list shares five symbols with the Invesco holdings
+# fixture below (NVDA, AAPL, MSFT, AMZN, META). That overlap is what makes
 # test_imported_holdings_survive_reseed a direct proof rather than an
 # indirect one: re-seeding actually hits
-# ON CONFLICT(etf_symbol, holding_symbol) DO UPDATE SET source=excluded.source
-# for those five rows, instead of merely adding unrelated seed rows alongside
-# untouched holdings_file rows.
+# ON CONFLICT(etf_symbol, holding_symbol) for those five rows, instead of
+# merely adding unrelated seed rows alongside untouched holdings_file rows.
 ILCB_SEED_TOP_TEN = ["NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "AVGO", "GOOG", "META", "TSLA", "MU"]
+ILCB_SHARED_WITH_INVESCO = ["NVDA", "AAPL", "MSFT", "AMZN", "META"]
+INVESCO_SYMBOLS = ["NVDA", "AAPL", "MSFT", "AMZN", "META", "SH"]
 
 
 def test_imported_holdings_survive_reseed(tmp_path: Path) -> None:
@@ -27,14 +43,13 @@ def test_imported_holdings_survive_reseed(tmp_path: Path) -> None:
     load_fund_holdings(conn, "ILCB", INVESCO)
     load_seed_universe(conn, SEED)  # must not flip holdings_file rows back to seed_top_ten
 
-    rows = conn.execute(
-        "SELECT holding_symbol, weight, source FROM etf_holding WHERE etf_symbol = 'ILCB' ORDER BY rank"
+    imported = conn.execute(
+        "SELECT holding_symbol, weight FROM etf_holding "
+        "WHERE etf_symbol = 'ILCB' AND source = 'holdings_file' ORDER BY rank"
     ).fetchall()
-    symbols = [r["holding_symbol"] for r in rows]
-    assert symbols == ["NVDA", "AAPL", "MSFT", "AMZN", "META", "SH"]
-    assert all(r["source"] == "holdings_file" for r in rows)
-    assert rows[0]["weight"] == 9.50
-    assert rows[-1]["weight"] == -1.20
+    assert [row["holding_symbol"] for row in imported] == INVESCO_SYMBOLS
+    assert imported[0]["weight"] == 9.50
+    assert imported[-1]["weight"] == -1.20
 
     # NVDA sits in both the imported holdings fixture and ILCB's seed
     # top-ten list, so this row is the one whose ON CONFLICT resolution
@@ -46,6 +61,65 @@ def test_imported_holdings_survive_reseed(tmp_path: Path) -> None:
     ).fetchone()
     assert nvda_row["source"] == "holdings_file"
     assert nvda_row["weight"] == 9.50
+
+
+def test_reseed_restores_seed_rows_alongside_imported_holdings(tmp_path: Path) -> None:
+    """Seeding no longer skips a fund merely because it has imported holdings.
+
+    Skipping it was the old defence against relabeling, and it left an
+    imported fund with no seed membership at all. The fund now carries both:
+    every seed symbol not occupied by an imported row is present as a
+    ``seed_top_ten`` row.
+    """
+    conn = connect(tmp_path / "atlas.db")
+    load_fund_holdings(conn, "ILCB", INVESCO)
+    load_seed_universe(conn, SEED)
+
+    seed_rows = conn.execute(
+        "SELECT holding_symbol FROM etf_holding "
+        "WHERE etf_symbol = 'ILCB' AND source = 'seed_top_ten' ORDER BY rank"
+    ).fetchall()
+    expected = [s for s in ILCB_SEED_TOP_TEN if s not in ILCB_SHARED_WITH_INVESCO]
+    assert [row["holding_symbol"] for row in seed_rows] == expected
+
+
+def test_reseed_gives_a_non_colliding_fund_its_whole_seed_top_ten(tmp_path: Path) -> None:
+    """DIVB's seed list and the imported file share no symbols, so both survive whole."""
+    conn = connect(tmp_path / "atlas.db")
+    load_fund_holdings(conn, "DIVB", INVESCO)
+    load_seed_universe(conn, SEED)
+
+    seed_rows = conn.execute(
+        "SELECT holding_symbol FROM etf_holding "
+        "WHERE etf_symbol = 'DIVB' AND source = 'seed_top_ten' ORDER BY rank"
+    ).fetchall()
+    assert [row["holding_symbol"] for row in seed_rows] == DIVB_SEED_TOP_TEN
+
+    imported = conn.execute(
+        "SELECT holding_symbol FROM etf_holding "
+        "WHERE etf_symbol = 'DIVB' AND source = 'holdings_file' ORDER BY rank"
+    ).fetchall()
+    assert [row["holding_symbol"] for row in imported] == INVESCO_SYMBOLS
+
+
+def test_repeated_reseeds_do_not_duplicate_or_erode_rows(tmp_path: Path) -> None:
+    """`generate-report` re-seeds every run; the row set must be a fixed point."""
+    conn = connect(tmp_path / "atlas.db")
+    load_fund_holdings(conn, "ILCB", INVESCO)
+    load_seed_universe(conn, SEED)
+    first = conn.execute(
+        "SELECT holding_symbol, rank, weight, source FROM etf_holding "
+        "WHERE etf_symbol = 'ILCB' ORDER BY source, holding_symbol"
+    ).fetchall()
+
+    load_seed_universe(conn, SEED)
+    load_seed_universe(conn, SEED)
+    second = conn.execute(
+        "SELECT holding_symbol, rank, weight, source FROM etf_holding "
+        "WHERE etf_symbol = 'ILCB' ORDER BY source, holding_symbol"
+    ).fetchall()
+
+    assert [tuple(row) for row in second] == [tuple(row) for row in first]
 
 
 def test_funds_without_imported_holdings_still_get_seed_top_ten(tmp_path: Path) -> None:
@@ -60,11 +134,6 @@ def test_funds_without_imported_holdings_still_get_seed_top_ten(tmp_path: Path) 
     ).fetchall()
     assert [r["holding_symbol"] for r in bndw_rows] == ["BND", "BNDX"]
     assert all(r["source"] == "seed_top_ten" for r in bndw_rows)
-
-    divb_rows = conn.execute(
-        "SELECT source FROM etf_holding WHERE etf_symbol = 'DIVB'"
-    ).fetchall()
-    assert all(r["source"] == "holdings_file" for r in divb_rows)
 
 
 def test_etf_metadata_row_still_updates_on_reseed(tmp_path: Path) -> None:

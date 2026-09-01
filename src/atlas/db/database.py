@@ -84,33 +84,34 @@ def load_seed_universe(conn: sqlite3.Connection, seed_path: Path) -> int:
                 fund["source"],
             ),
         )
-        # Real imported holdings (source='holdings_file') always outrank the
-        # seed top-ten list. Without this check, the DELETE+INSERT below —
-        # which runs on every `generate-report` and `atlas serve` startup —
-        # would silently flip an imported row back to seed_top_ten (with a
-        # now-stale weight attached), destroying real data. If the fund has
-        # any holdings_file rows, skip touching its holdings entirely; the
-        # only way to replace imported holdings is to re-import them.
-        has_holdings_file_rows = (
-            conn.execute(
-                "SELECT 1 FROM etf_holding WHERE etf_symbol = ? AND source = 'holdings_file' LIMIT 1",
-                (symbol,),
-            ).fetchone()
-            is not None
+        # Refresh only this fund's seed rows. An imported holdings file lives
+        # alongside them and is never rewritten from here: a fund's seed
+        # membership and its real weights are two different pieces of
+        # evidence, and only one of them can be reconstructed from the CSV.
+        conn.execute(
+            "DELETE FROM etf_holding WHERE etf_symbol = ? AND source = 'seed_top_ten'",
+            (symbol,),
         )
-        if not has_holdings_file_rows:
-            conn.execute("DELETE FROM etf_holding WHERE etf_symbol = ? AND source = 'seed_top_ten'", (symbol,))
-            for rank, holding_symbol in enumerate(fund["holding_symbols"], start=1):
-                conn.execute(
-                    """
-                    INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, source)
-                    VALUES (?, ?, ?, 'seed_top_ten')
-                    ON CONFLICT(etf_symbol, holding_symbol) DO UPDATE SET
-                        rank=excluded.rank,
-                        source=excluded.source
-                    """,
-                    (symbol, holding_symbol, rank),
-                )
+        for rank, holding_symbol in enumerate(fund["holding_symbols"], start=1):
+            # THE GUARD. `etf_holding` allows one row per (fund, symbol), so a
+            # seed symbol already occupied by an imported row lands here as a
+            # conflict. Without `WHERE etf_holding.source <> 'holdings_file'`
+            # this upsert would relabel that row seed_top_ten and overwrite its
+            # weight-order rank — on every `generate-report` and every web-app
+            # startup, silently converting real issuer data into membership
+            # data. The imported row keeps the slot instead; the seed symbol is
+            # simply not re-created as a separate row.
+            conn.execute(
+                """
+                INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, source)
+                VALUES (?, ?, ?, 'seed_top_ten')
+                ON CONFLICT(etf_symbol, holding_symbol) DO UPDATE SET
+                    rank=excluded.rank,
+                    source=excluded.source
+                WHERE etf_holding.source <> 'holdings_file'
+                """,
+                (symbol, holding_symbol, rank),
+            )
         count += 1
     conn.commit()
     return count
@@ -152,14 +153,21 @@ def load_portfolio_csv(conn: sqlite3.Connection, portfolio_name: str, portfolio_
 
 
 def load_fund_holdings(conn: sqlite3.Connection, etf_symbol: str, path: Path) -> int:
-    """Import an issuer holdings-with-weights CSV, replacing prior holdings for the fund.
+    """Import an issuer holdings-with-weights CSV, replacing prior imports for the fund.
 
     Parses ``path`` with :class:`~atlas.providers.holdings_file.HoldingsFileProvider`,
-    deletes all existing ``etf_holding`` rows for the fund (both sources), then
+    deletes the fund's existing ``holdings_file`` rows — and only those — then
     inserts the parsed rows tagged ``source='holdings_file'`` with ``rank``
-    assigned 1..N by descending weight. Re-import fully replaces rather than
-    accumulating. Imported holdings always outrank the seed top-ten list (see
-    ``load_seed_universe``).
+    assigned 1..N by descending weight. Re-import fully replaces the imported
+    set rather than accumulating.
+
+    Seed select-list rows (``source='seed_top_ten'``) survive an import. They
+    are a different kind of evidence: membership in the fund's published top
+    ten, which a partial issuer export cannot replace. Deleting them used to
+    leave a fund whose "top ten" was however many rows the file happened to
+    contain, permanently. Which of the two sources a fund's top ten is drawn
+    from is decided at read time by :data:`~atlas.analytics.overlap.TOP_TEN_CTE`,
+    not by destroying rows here.
 
     Inserts a minimal ``etf`` row for the symbol (description ``''``) if one
     does not already exist, since ``etf_holding`` has a foreign key to
@@ -173,8 +181,23 @@ def load_fund_holdings(conn: sqlite3.Connection, etf_symbol: str, path: Path) ->
         "INSERT INTO etf (symbol, description) VALUES (?, ?) ON CONFLICT(symbol) DO NOTHING",
         (symbol, ""),
     )
-    conn.execute("DELETE FROM etf_holding WHERE etf_symbol = ?", (symbol,))
+    conn.execute(
+        "DELETE FROM etf_holding WHERE etf_symbol = ? AND source = 'holdings_file'",
+        (symbol,),
+    )
     for rank, holding in enumerate(holdings, start=1):
+        # `etf_holding` is PRIMARY KEY (etf_symbol, holding_symbol), so the two
+        # sources cannot both hold a row for the same symbol. A name in both the
+        # seed top ten and the imported file is resolved in favour of the
+        # imported row: it carries the real weight that look-through
+        # concentration and the top-ten-by-weight rule are computed from, while
+        # the seed row carries membership and nothing else. The colliding seed
+        # row is deleted here, in the open, rather than being converted by an
+        # ON CONFLICT clause whose effect is easy to miss.
+        conn.execute(
+            "DELETE FROM etf_holding WHERE etf_symbol = ? AND holding_symbol = ?",
+            (symbol, holding.holding_symbol),
+        )
         conn.execute(
             """
             INSERT INTO etf_holding (
