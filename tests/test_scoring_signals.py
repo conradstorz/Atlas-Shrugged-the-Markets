@@ -124,6 +124,33 @@ def test_seed_top_ten_rows_are_not_measured(tmp_path: Path) -> None:
     assert measured_diversification(conn, "SEEDY") is None
 
 
+def test_breadth_is_measured_from_the_file_even_when_seed_rows_exist(tmp_path: Path) -> None:
+    """Breadth reads the imported file's own coverage, not the top-ten rule.
+
+    Since imports stopped deleting seed rows, a fund can hold both kinds at
+    once. Breadth is a property of the holdings file alone: how many names it
+    lists and how much of the fund it covers. The presence of a seed top ten
+    beside it changes nothing.
+    """
+    conn = connect(tmp_path / "atlas.db")
+    _add_etf(conn, "BOTH", "Total broad market", ["A", "B", "C"])
+    _add_holdings_file(conn, "BOTH", 500)
+
+    measure = measured_diversification(conn, "BOTH")
+
+    assert measure is not None
+    assert measure.holdings_count == 500
+
+
+def test_partial_file_beside_seed_rows_is_still_not_measured(tmp_path: Path) -> None:
+    """The top-ten rule falls back to the seed list here; breadth stays unknown."""
+    conn = connect(tmp_path / "atlas.db")
+    _add_etf(conn, "SLICE", "Total broad market", ["A", "B", "C"])
+    _add_holdings_file(conn, "SLICE", 10, total_weight=35.0)
+
+    assert measured_diversification(conn, "SLICE") is None
+
+
 def test_fund_with_no_holdings_at_all_is_not_measured(tmp_path: Path) -> None:
     conn = connect(tmp_path / "atlas.db")
     _add_etf(conn, "EMPTY", "Total broad market")

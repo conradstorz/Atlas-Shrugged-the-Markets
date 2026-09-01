@@ -4,7 +4,7 @@ import sqlite3
 from dataclasses import dataclass
 from math import log10
 
-from atlas.analytics.overlap import holdings_weight_source
+from atlas.analytics.overlap import FULL_COVERAGE_THRESHOLD
 from atlas.parsing import parse_percent
 from atlas.scoring.model import ScoreBreakdown
 
@@ -26,11 +26,12 @@ BREADTH_FLOOR = 10
 BREADTH_CEILING = 3000
 
 # Breadth is only measurable from a holdings file that covers essentially the
-# whole fund. An issuer's full holdings file sums to ~100% of net assets; a
-# top-ten-only export sums to ~30-40%. This threshold separates "the whole
-# fund" from "a partial export" using data already stored. A partial file means
-# breadth is unknown, not small.
-FULL_COVERAGE_THRESHOLD = 90.0
+# whole fund; a partial file means breadth is unknown, not small. The same
+# threshold decides whether such a file supersedes a fund's seed top ten, so it
+# is defined once, in `atlas.analytics.overlap` — the lower-level of the two
+# rules — and imported here rather than restated. Importing it also keeps
+# `from atlas.scoring.engine import FULL_COVERAGE_THRESHOLD` working for
+# callers that already looked for it here.
 
 # Points of the 0-100 scale shared by the scored components; the remaining 20
 # is the base every fund starts from. The budget is fixed, so a component that
@@ -74,18 +75,23 @@ def measured_diversification(
     """Measure a fund's diversification as the breadth of what it holds.
 
     Returns ``None`` — meaning "not measured", never a stand-in value — unless
-    the fund's holdings come from an imported holdings file
-    (``source='holdings_file'``) whose weights total at least
-    :data:`FULL_COVERAGE_THRESHOLD` percent of the fund.
+    the fund has imported holdings-file rows (``source='holdings_file'``) whose
+    weights total at least :data:`FULL_COVERAGE_THRESHOLD` percent of the fund.
 
     Seed rows are top-ten *membership*, not a holdings list, and a partial
     issuer export is a slice of the fund. Counting either as breadth would
     report every seed fund — including a total-market index — as holding ten
     names, which is a worse lie than saying nothing.
+
+    This asks the imported file about its own coverage rather than asking
+    :func:`~atlas.analytics.overlap.holdings_weight_source` which list the
+    fund's *top ten* is drawn from. The two questions have different answers
+    now that both sources can sit on one fund: a fund whose top ten comes from
+    its seed list can still have a full holdings file behind it, and a fund
+    with no seed rows reports a partial file as its top-ten source without that
+    file being enough to measure breadth from.
     """
     symbol = etf_symbol.upper()
-    if holdings_weight_source(conn, symbol) != "holdings_file":
-        return None
     row = conn.execute(
         """
         SELECT COUNT(*) AS holdings_count, COALESCE(SUM(weight), 0.0) AS weight_total
