@@ -23,7 +23,7 @@ def test_etf_scores_page_loads() -> None:
 
 
 def test_fund_page_top_ten_shows_ten_rows_not_the_whole_holdings_file(tmp_path: Path) -> None:
-    """"Parsed Top-Ten Holdings" must mean ten, even after a 30-row import.
+    """The "Parsed Top-Ten Holdings" heading must mean ten, even after a 30-row import.
 
     The weights sum to 93%, so the file covers the whole fund and supersedes
     SCHB's seed select-list top ten. A partial file would not: the fund would

@@ -330,3 +330,41 @@ def test_a_fresh_database_is_created_on_the_widened_key(tmp_path: Path) -> None:
         "holding_symbol",
         "source",
     ]
+
+
+
+def test_an_unfamiliar_primary_key_is_left_untouched(tmp_path: Path) -> None:
+    """The widening migration must fire only on the exact legacy key.
+
+    It rewrites a table holding issuer files the investor downloaded by hand.
+    A key this migration does not recognize may encode a property that
+    rebuilding to the assumed shape would silently discard, so an unfamiliar
+    shape is left alone rather than migrated on a guess.
+    """
+    db = tmp_path / "custom.db"
+    raw = sqlite3.connect(db)
+    raw.executescript(
+        """
+        CREATE TABLE etf (symbol TEXT PRIMARY KEY, description TEXT NOT NULL);
+        CREATE TABLE etf_holding (
+            etf_symbol TEXT NOT NULL REFERENCES etf(symbol),
+            holding_symbol TEXT NOT NULL,
+            holding_name TEXT,
+            rank INTEGER NOT NULL,
+            weight REAL,
+            source TEXT NOT NULL DEFAULT 'seed_top_ten',
+            PRIMARY KEY (etf_symbol, holding_symbol, rank)
+        );
+        INSERT INTO etf VALUES ('AAA', 'A fund');
+        INSERT INTO etf_holding VALUES ('AAA', 'NVDA', 'NVIDIA', 1, 7.0, 'holdings_file');
+        """
+    )
+    raw.commit()
+    raw.close()
+
+    conn = connect(db)
+
+    key = [c["name"] for c in sorted(conn.execute("PRAGMA table_info(etf_holding)"), key=lambda c: c["pk"]) if c["pk"]]
+    assert key == ["etf_symbol", "holding_symbol", "rank"], "unfamiliar key must survive untouched"
+    assert conn.execute("SELECT COUNT(*) AS c FROM etf_holding").fetchone()["c"] == 1
+    conn.close()

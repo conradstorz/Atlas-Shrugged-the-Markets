@@ -15,6 +15,10 @@ SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 # if the column order ever differed between the old table and the new one.
 ETF_HOLDING_COLUMNS = ("etf_symbol", "holding_symbol", "holding_name", "rank", "weight", "source")
 
+# The one primary key shape `_widen_etf_holding_key` knows how to widen, in key
+# order. Anything else is left untouched rather than rebuilt on a guess.
+LEGACY_ETF_HOLDING_KEY = ("etf_symbol", "holding_symbol")
+
 # `etf_holding` under the widened key, used only to rebuild an existing table.
 # Keep it identical to the definition in `schema.sql`, which is what a fresh
 # database is created from; `tests/test_holding_key_migration.py` compares the
@@ -115,10 +119,14 @@ def _widen_etf_holding_key(conn: sqlite3.Connection) -> None:
     columns = conn.execute("PRAGMA table_info(etf_holding)").fetchall()
     if not columns:
         return  # No such table yet; the schema script has just created it.
-    source_column = next((column for column in columns if column["name"] == "source"), None)
-    if source_column is None or source_column["pk"]:
-        # Either a shape this migration does not know how to widen, or the key
-        # already includes `source` and there is nothing to do.
+    # Only the exact legacy key is migrated. This rewrites a table holding
+    # issuer files the investor downloaded by hand, so it fires on the one
+    # shape it was written for and nothing else: an unfamiliar key may encode a
+    # property that rebuilding to our assumed shape would silently discard.
+    key = [column["name"] for column in sorted(columns, key=lambda c: c["pk"]) if column["pk"]]
+    if key != list(LEGACY_ETF_HOLDING_KEY):
+        # Already widened, created fresh on the current schema, or a shape this
+        # migration does not recognize. Leave it alone.
         return
 
     conn.commit()  # Leave any implicit transaction before touching PRAGMAs.
