@@ -47,6 +47,26 @@ WITH atlas_top_ten AS (
 """
 
 
+HOLDINGS_BASIS_LABELS = {
+    "holdings_file": "imported holdings file",
+    "seed_top_ten": "seed select-list",
+}
+
+
+def holdings_basis_label(source: str | None) -> str:
+    """Describe a top ten's source in words the investor reads.
+
+    ``None`` means the fund has no holdings rows at all. An unrecognized
+    source is reported by name rather than folded into "no holdings":
+    ``etf_holding.source`` carries no CHECK constraint, so a future source
+    type or a hand-edited row would otherwise be labelled as having no
+    holdings while plainly having some.
+    """
+    if source is None:
+        return "no holdings"
+    return HOLDINGS_BASIS_LABELS.get(source, f"unrecognized source '{source}'")
+
+
 @dataclass(frozen=True)
 class OverlapResult:
     left_symbol: str
@@ -56,6 +76,21 @@ class OverlapResult:
     right_count: int
     jaccard_percent: float
     shared_symbols: list[str]
+    left_source: str | None
+    right_source: str | None
+
+    @property
+    def mixed_basis(self) -> bool:
+        """True when the two sides' top tens come from different kinds of source.
+
+        An issuer's real top ten and a seed select-list top ten are both valid
+        top tens, but they are not the same kind of list, so an overlap figure
+        across them is not like-for-like. A side with no holdings at all is not
+        a mismatch — there is no second basis to disagree with.
+        """
+        if self.left_source is None or self.right_source is None:
+            return False
+        return self.left_source != self.right_source
 
 
 def top_ten_holdings(conn: sqlite3.Connection, etf_symbol: str) -> list[str]:
@@ -90,6 +125,11 @@ def compare_etfs(conn: sqlite3.Connection, left_symbol: str, right_symbol: str) 
     :func:`top_ten_holdings`). The comparison is membership-only: it counts
     shared names and ignores how much of each fund they represent. Weighted
     overlap math is still future work.
+
+    Each side's basis is reported in ``left_source`` / ``right_source``, and
+    ``mixed_basis`` flags a comparison drawn across the two kinds, so the
+    caller can say which list it actually compared rather than implying the
+    two are alike.
     """
     left = set(top_ten_holdings(conn, left_symbol))
     right = set(top_ten_holdings(conn, right_symbol))
@@ -104,6 +144,8 @@ def compare_etfs(conn: sqlite3.Connection, left_symbol: str, right_symbol: str) 
         right_count=len(right),
         jaccard_percent=round(jaccard, 1),
         shared_symbols=shared,
+        left_source=holdings_weight_source(conn, left_symbol),
+        right_source=holdings_weight_source(conn, right_symbol),
     )
 
 

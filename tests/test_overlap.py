@@ -6,7 +6,7 @@ so every Jaccard/count assertion can be verified by hand.
 
 from pathlib import Path
 
-from atlas.analytics.overlap import compare_etfs, top_repeated_holdings
+from atlas.analytics.overlap import compare_etfs, holdings_basis_label, top_repeated_holdings
 from atlas.db.database import connect
 
 
@@ -89,3 +89,68 @@ def test_repeated_holdings_only_returns_holdings_in_more_than_one_etf(tmp_path: 
     assert rows[0]["holding_symbol"] == "X"
     assert rows[0]["etf_count"] == 2
     assert set(rows[0]["etfs"].split(", ")) == {"AAA", "BBB"}
+
+
+def _add_weighted(conn, etf_symbol: str, holdings: list[tuple]) -> None:
+    """holdings: (holding_symbol, weight_percent), stored as source='holdings_file'."""
+    conn.execute(
+        "INSERT INTO etf (symbol, description) VALUES (?, ?) ON CONFLICT(symbol) DO NOTHING",
+        (etf_symbol, f"{etf_symbol} test fund"),
+    )
+    for rank, (holding, weight) in enumerate(holdings, start=1):
+        conn.execute(
+            "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, weight, source) "
+            "VALUES (?, ?, ?, ?, 'holdings_file')",
+            (etf_symbol, holding, rank, weight),
+        )
+    conn.commit()
+
+
+def test_overlap_reports_each_side_holdings_basis(tmp_path: Path) -> None:
+    """A comparison must disclose which kind of top ten each side used.
+
+    An imported issuer top ten and a seed select-list top ten are different
+    kinds of list; comparing one against the other is legitimate but must not
+    look like a like-for-like comparison.
+    """
+    conn = connect(tmp_path / "atlas.db")
+    _seed_universe(conn)  # AAA and BBB carry seed membership rows
+    _add_weighted(conn, "WGT", [("X", 9.0), ("Y", 8.0)])
+
+    mixed = compare_etfs(conn, "WGT", "AAA")
+    assert mixed.left_source == "holdings_file"
+    assert mixed.right_source == "seed_top_ten"
+    assert mixed.mixed_basis is True
+
+    same = compare_etfs(conn, "AAA", "BBB")
+    assert same.left_source == "seed_top_ten"
+    assert same.right_source == "seed_top_ten"
+    assert same.mixed_basis is False
+
+
+def test_overlap_basis_is_none_for_a_fund_with_no_holdings(tmp_path: Path) -> None:
+    """An unknown or holdings-free fund reports no basis, and is not 'mixed'."""
+    conn = connect(tmp_path / "atlas.db")
+    _seed_universe(conn)
+
+    result = compare_etfs(conn, "AAA", "NOPE")
+
+    assert result.left_source == "seed_top_ten"
+    assert result.right_source is None
+    # One side having nothing to compare is an empty comparison, not a
+    # mismatched-basis warning: there is no second basis to mismatch.
+    assert result.mixed_basis is False
+
+
+def test_basis_label_distinguishes_no_holdings_from_an_unknown_source() -> None:
+    """An unrecognized source must not read as "no holdings".
+
+    `etf_holding.source` has no CHECK constraint, so a future source type or a
+    hand-edited row is possible. Labelling it "no holdings" would assert
+    something false about a fund that plainly has holdings.
+    """
+    assert holdings_basis_label("holdings_file") == "imported holdings file"
+    assert holdings_basis_label("seed_top_ten") == "seed select-list"
+    assert holdings_basis_label(None) == "no holdings"
+    assert holdings_basis_label("some_future_source") == "unrecognized source 'some_future_source'"
+    assert holdings_basis_label("") == "unrecognized source ''"

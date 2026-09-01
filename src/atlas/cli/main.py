@@ -7,7 +7,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from atlas.analytics.overlap import compare_etfs, top_repeated_holdings
+from atlas.analytics.overlap import compare_etfs, holdings_basis_label, top_repeated_holdings
 from atlas.db.database import connect, load_fund_holdings, load_portfolio_csv, load_seed_universe
 from atlas.exceptions import AtlasDataError
 from atlas.journal.service import add_journal_entry, list_journal_entries
@@ -86,11 +86,27 @@ def compare_overlap(
     table.add_column("Metric")
     table.add_column("Value")
     table.add_row("Shared holdings", str(result.shared_count))
-    table.add_row(f"{result.left_symbol} parsed holdings", str(result.left_count))
-    table.add_row(f"{result.right_symbol} parsed holdings", str(result.right_count))
+    table.add_row(
+        f"{result.left_symbol} top ten",
+        f"{result.left_count} ({holdings_basis_label(result.left_source)})",
+    )
+    table.add_row(
+        f"{result.right_symbol} top ten",
+        f"{result.right_count} ({holdings_basis_label(result.right_source)})",
+    )
     table.add_row("Jaccard overlap", f"{result.jaccard_percent}%")
     table.add_row("Shared symbols", ", ".join(result.shared_symbols) or "None")
     console.print(table)
+    if result.mixed_basis:
+        # One side's ten came from an issuer's own holdings file and the
+        # other's from the seed select-list. Both are real top tens, but they
+        # are not the same kind of list, so the overlap figure is not
+        # like-for-like and must not be read as one.
+        console.print(
+            "\n[yellow]These two top tens come from different sources, so this "
+            "overlap is not like-for-like.[/yellow] Import holdings for both "
+            "funds to compare issuer data against issuer data."
+        )
 
 
 @app.command("repeat-holdings")
