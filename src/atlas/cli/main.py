@@ -8,12 +8,14 @@ from rich.panel import Panel
 from rich.table import Table
 
 from atlas.analytics.overlap import compare_etfs, top_repeated_holdings
-from atlas.db.database import connect, load_portfolio_csv, load_seed_universe
+from atlas.db.database import connect, load_fund_holdings, load_portfolio_csv, load_seed_universe
+from atlas.exceptions import AtlasDataError
 from atlas.journal.service import add_journal_entry, list_journal_entries
-from atlas.portfolio.analysis import combined_concentration, summarize_portfolio
+from atlas.portfolio.analysis import combined_concentration, summarize_portfolio, universe_coverage
 from atlas.portfolio.schwab import load_schwab_positions
 from atlas.reports.markdown import write_research_report
 from atlas.scoring.engine import score_all
+from atlas.scoring.model import SCORER_VERSION
 
 app = typer.Typer(help="Atlas private investment decision intelligence CLI.")
 console = Console()
@@ -36,12 +38,12 @@ def score_etfs(
     db: Path = typer.Option(Path(".atlas/atlas.db"), help="SQLite database path."),
     limit: int = typer.Option(25, help="Number of ranked ETFs to display."),
 ) -> None:
-    """Load the seed universe and print v0.4 explainable ETF scores."""
+    """Load the seed universe and print explainable ETF scores."""
     conn = connect(db)
     loaded = load_seed_universe(conn, seed)
     scores = score_all(conn)
 
-    table = Table(title=f"Atlas ETF Scores v0.4 — {loaded} ETFs loaded")
+    table = Table(title=f"Atlas ETF Scores {SCORER_VERSION} — {loaded} ETFs loaded")
     table.add_column("Rank", justify="right")
     table.add_column("ETF")
     table.add_column("Score", justify="right")
@@ -64,7 +66,11 @@ def score_etfs(
         )
 
     console.print(table)
-    console.print("\nThis is still a heuristic scoring pass. Full holdings and valuation enrichment come next.")
+    console.print(
+        "\nThis is still a heuristic scoring pass. Diversification is measured from each "
+        "fund's top ten — its real top ten by weight where `atlas import-holdings` has been "
+        "run, its seed select-list top ten otherwise. Valuation enrichment comes next."
+    )
 
 
 @app.command("compare-overlap")
@@ -95,7 +101,7 @@ def repeat_holdings(
     """Show companies appearing most often across ETF top-ten lists."""
     conn = connect(db)
     rows = top_repeated_holdings(conn, limit=limit)
-    table = Table(title="Most Repeated Seed Holdings")
+    table = Table(title="Most Repeated Top-Ten Holdings")
     table.add_column("Holding")
     table.add_column("ETF Count", justify="right")
     table.add_column("ETFs")
@@ -135,13 +141,107 @@ def import_schwab(
     )
 
 
+@app.command("import-holdings")
+def import_holdings(
+    symbol: str = typer.Argument(..., help="ETF ticker to import holdings for."),
+    holdings_csv: Path = typer.Argument(..., help="Issuer fund holdings CSV export (with weights)."),
+    db: Path = typer.Option(Path(".atlas/atlas.db"), help="SQLite database path."),
+) -> None:
+    """Import an issuer fund-holdings CSV (with weights) for one ETF."""
+    conn = connect(db)
+    symbol = symbol.strip().upper()
+    try:
+        count = load_fund_holdings(conn, symbol, holdings_csv)
+    except AtlasDataError as exc:
+        # A misread holdings file is the most dangerous realistic failure mode,
+        # so it must read as a clean, actionable error rather than a Rich
+        # traceback with a local-variable dump. Same shape as `coverage`.
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+    if count == 0:
+        console.print(f"Imported 0 holdings for {symbol}. No usable rows were found in {holdings_csv}.")
+        return
+    total_weight = conn.execute(
+        "SELECT COALESCE(SUM(weight), 0) AS total FROM etf_holding "
+        "WHERE etf_symbol = ? AND source = 'holdings_file'",
+        (symbol,),
+    ).fetchone()["total"]
+    console.print(f"Imported {count} holdings for {symbol} ({total_weight:.2f}% of fund by weight).")
+
+
+@app.command("coverage")
+def coverage(
+    name: str | None = typer.Option(None, help="Portfolio name for portfolio-level coverage."),
+    db: Path = typer.Option(Path(".atlas/atlas.db"), help="SQLite database path."),
+) -> None:
+    """Show how much of the ETF universe — and optionally a portfolio — Atlas can model.
+
+    Always prints universe-wide fund coverage. With ``--name``, also prints the
+    modeled share of that portfolio's dollars and a per-fund breakdown; funds
+    lacking real weights are the actionable list, since importing a holdings
+    file for each is how coverage is raised.
+    """
+    conn = connect(db)
+    uc = universe_coverage(conn)
+    console.print(
+        f"Universe: {uc.total_funds} funds — {uc.weighted_funds} with real weights, "
+        f"{uc.membership_only_funds} top-ten membership only, {uc.no_holdings_funds} with no holdings."
+    )
+
+    if name is None:
+        return
+
+    try:
+        report = combined_concentration(conn, name)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+
+    modeled_percent = (report.modeled_value / report.total_value * 100) if report.total_value else 0.0
+    console.print(
+        f"\nPortfolio '{name}': modeled ${report.modeled_value:,.2f} of "
+        f"${report.total_value:,.2f} ({modeled_percent:.2f}%)."
+    )
+    console.print(
+        f"  Unmodeled fund value: ${report.unmodeled_fund_value:,.2f}   "
+        f"Cash: ${report.cash_value:,.2f}   Other: ${report.other_value:,.2f}"
+    )
+
+    table = Table(title=f"Fund Coverage — {name}")
+    table.add_column("Fund")
+    table.add_column("Market Value", justify="right")
+    table.add_column("Has Weights")
+    table.add_column("Modeled Share", justify="right")
+    table.add_column("Modeled Value", justify="right")
+    for fc in report.fund_coverage:
+        has_weights_display = "Yes" if fc.has_weights else "[bold red]No[/bold red]"
+        table.add_row(
+            fc.symbol,
+            f"${fc.market_value:,.2f}",
+            has_weights_display,
+            f"{fc.modeled_share * 100:.2f}%",
+            f"${fc.modeled_value:,.2f}",
+        )
+    console.print(table)
+    if any(not fc.has_weights for fc in report.fund_coverage):
+        console.print(
+            "\nRun `atlas import-holdings SYMBOL FILE` for each fund marked 'No' above to raise coverage."
+        )
+
+
 @app.command("analyze-portfolio")
 def analyze_portfolio(
     name: str = typer.Option("Primary", help="Portfolio name."),
     db: Path = typer.Option(Path(".atlas/atlas.db"), help="SQLite database path."),
     limit: int = typer.Option(20, help="Number of hidden concentration rows."),
 ) -> None:
-    """Summarize a private portfolio and estimate hidden top-ten concentration."""
+    """Summarize a private portfolio and report its exact combined concentration.
+
+    Combines directly-held positions with weighted look-through into funds whose
+    real holdings have been imported (`atlas import-holdings`). Nothing here is
+    estimated: fund value without imported weights is reported as unmodeled
+    rather than spread across a guess.
+    """
     conn = connect(db)
     summary = summarize_portfolio(conn, name)
     console.print(f"[bold]Portfolio:[/bold] {summary.name}")
@@ -152,6 +252,12 @@ def analyze_portfolio(
     )
 
     report = combined_concentration(conn, name, limit=limit)
+    modeled_percent = (report.modeled_value / report.total_value * 100) if report.total_value else 0.0
+    console.print(
+        f"\nModeled: ${report.modeled_value:,.2f} of ${report.total_value:,.2f} "
+        f"({modeled_percent:.2f}%). Unmodeled fund value: ${report.unmodeled_fund_value:,.2f}."
+    )
+
     table = Table(title="Combined Concentration (Direct + ETF/Fund Look-Through)")
     table.add_column("Symbol")
     table.add_column("Exposure %", justify="right")
@@ -169,9 +275,23 @@ def analyze_portfolio(
             ", ".join(line.source_funds) or "-",
         )
     console.print(table)
-    console.print(f"\nFund value not looked through: ${report.unmodeled_fund_value:,.2f}")
+    if len(report.lines) == limit:
+        # `combined_concentration` always trims to `limit` rows, so this is the
+        # best truncation signal available without summing across the two
+        # figures ourselves (the exact bug this caveat exists to prevent).
+        # A fund universe that lands on precisely `limit` modeled names would
+        # print this caveat unnecessarily, but that false positive is far
+        # cheaper than a reader mistaking a partial table for the whole one.
+        console.print(
+            f"\n[dim]Showing the top {limit} names by exposure; this table is "
+            "not the full modeled set. Use --limit to see more, or see the "
+            "Modeled line above for the total.[/dim]"
+        )
     console.print(
-        "Note: look-through uses the equal-weight top-ten prototype; direct holdings are exact."
+        "\nNote: direct holdings and weighted fund look-through (imported via "
+        "`atlas import-holdings`) are exact. Fund value without an imported "
+        "holdings file is excluded from this table rather than estimated; run "
+        "`atlas import-holdings SYMBOL FILE` to raise coverage."
     )
 
 

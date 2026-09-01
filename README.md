@@ -4,7 +4,7 @@
 
 Atlas is a private decision intelligence platform for long-term investors.
 
-This repository currently contains the first production-style Atlas Kernel implementation. The Kernel provides the platform spine: configuration, secrets abstraction, structured logging, plugin lifecycle, and health endpoints.
+This repository contains the Atlas Kernel — the platform spine of configuration, secrets abstraction, structured logging, plugin lifecycle, and health endpoints — plus the investment layer built on top of it: ETF scoring, weighted fund look-through, portfolio import, a decision journal, and a local dashboard.
 
 ## Quick Start
 
@@ -39,6 +39,8 @@ The Kernel intentionally contains no investment logic. It does not know about ET
 uv run atlas kernel-check
 uv run atlas import-seed --seed data/atlas_seed_universe.csv
 uv run atlas score-etfs
+uv run atlas import-holdings SYMBOL FILE
+uv run atlas coverage
 uv run atlas serve
 ```
 

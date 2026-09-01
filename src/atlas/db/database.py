@@ -1,49 +1,13 @@
 from __future__ import annotations
 
-import csv
 import sqlite3
 from pathlib import Path
 
+from atlas.providers.holdings_file import HoldingsFileProvider
+from atlas.providers.portfolio_files import PortfolioCsvProvider
+from atlas.providers.seed_universe import SeedUniverseProvider
+
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
-
-
-def parse_money(raw: str | None) -> float:
-    """Parse a Schwab-style money cell (``$9,846.00``) into a float.
-
-    Placeholders (``--``, ``N/A``), empty strings, and ``None`` become ``0.0``.
-    Never raises on malformed input.
-    """
-    if raw is None:
-        return 0.0
-    text = str(raw).strip()
-    if text in {"", "--", "N/A"}:
-        return 0.0
-    text = text.replace("$", "").replace(",", "").strip()
-    try:
-        return float(text or 0)
-    except ValueError:
-        return 0.0
-
-
-def normalize_asset_type(raw: str | None) -> str:
-    """Normalize a security-type label to the Atlas vocabulary.
-
-    Returns one of: ``equity``, ``etf``, ``mutual_fund``, ``cash``, ``other``.
-    Matching is case-insensitive and substring-based so it tolerates both the
-    Schwab labels ("ETFs & Closed End Funds") and legacy CSV values ("ETF").
-    """
-    text = (raw or "").strip().lower()
-    if not text or text in {"--", "n/a"}:
-        return "other"
-    if "cash" in text or "money market" in text:
-        return "cash"
-    if "mutual fund" in text:
-        return "mutual_fund"
-    if "etf" in text or "closed end" in text:
-        return "etf"
-    if "equity" in text:
-        return "equity"
-    return "other"
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -56,54 +20,57 @@ def connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-def _split_seed_holdings(raw: str | None) -> list[str]:
-    """Parse the uploaded select-list top-ten format, e.g. |NVDA||AAPL|."""
-    if not raw or raw.strip() in {"--", ""}:
-        return []
-    return [item.strip().upper() for item in raw.split("|") if item.strip()]
-
-
 def load_seed_universe(conn: sqlite3.Connection, seed_path: Path) -> int:
     """Load the seed ETF universe CSV and parse top-ten holdings."""
-    with seed_path.open("r", encoding="utf-8-sig", newline="") as csv_file:
-        reader = csv.DictReader(csv_file)
-        count = 0
-        for row in reader:
-            symbol = (row.get("Symbol") or "").strip().upper()
-            if not symbol:
-                continue
-            top_ten = row.get("Top Ten Holdings", "")
+    count = 0
+    for fund in SeedUniverseProvider(seed_path).iter_funds():
+        symbol = fund["symbol"]
+        conn.execute(
+            """
+            INSERT INTO etf (
+                symbol, description, fund_type, category, select_list,
+                top_ten_holdings, gross_expense_ratio,
+                information_technology_exposure, source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(symbol) DO UPDATE SET
+                description=excluded.description,
+                fund_type=excluded.fund_type,
+                category=excluded.category,
+                select_list=excluded.select_list,
+                top_ten_holdings=excluded.top_ten_holdings,
+                gross_expense_ratio=excluded.gross_expense_ratio,
+                information_technology_exposure=excluded.information_technology_exposure,
+                source=excluded.source
+            """,
+            (
+                symbol,
+                fund["description"],
+                fund["fund_type"],
+                fund["category"],
+                fund["select_list"],
+                fund["top_ten_holdings"],
+                fund["gross_expense_ratio"],
+                fund["information_technology_exposure"],
+                fund["source"],
+            ),
+        )
+        # Real imported holdings (source='holdings_file') always outrank the
+        # seed top-ten list. Without this check, the DELETE+INSERT below —
+        # which runs on every `generate-report` and `atlas serve` startup —
+        # would silently flip an imported row back to seed_top_ten (with a
+        # now-stale weight attached), destroying real data. If the fund has
+        # any holdings_file rows, skip touching its holdings entirely; the
+        # only way to replace imported holdings is to re-import them.
+        has_holdings_file_rows = (
             conn.execute(
-                """
-                INSERT INTO etf (
-                    symbol, description, fund_type, category, select_list,
-                    top_ten_holdings, gross_expense_ratio,
-                    information_technology_exposure, source
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(symbol) DO UPDATE SET
-                    description=excluded.description,
-                    fund_type=excluded.fund_type,
-                    category=excluded.category,
-                    select_list=excluded.select_list,
-                    top_ten_holdings=excluded.top_ten_holdings,
-                    gross_expense_ratio=excluded.gross_expense_ratio,
-                    information_technology_exposure=excluded.information_technology_exposure,
-                    source=excluded.source
-                """,
-                (
-                    symbol,
-                    row.get("Description", ""),
-                    row.get("Fund Type", ""),
-                    row.get("ETF Select List® Category", ""),
-                    row.get("ETF Select List", ""),
-                    top_ten,
-                    row.get("Gross Expense Ratio", ""),
-                    row.get("Sector Exposure: Information Technology", ""),
-                    row.get("Source", "Uploaded ETF Select List"),
-                ),
-            )
+                "SELECT 1 FROM etf_holding WHERE etf_symbol = ? AND source = 'holdings_file' LIMIT 1",
+                (symbol,),
+            ).fetchone()
+            is not None
+        )
+        if not has_holdings_file_rows:
             conn.execute("DELETE FROM etf_holding WHERE etf_symbol = ? AND source = 'seed_top_ten'", (symbol,))
-            for rank, holding_symbol in enumerate(_split_seed_holdings(top_ten), start=1):
+            for rank, holding_symbol in enumerate(fund["holding_symbols"], start=1):
                 conn.execute(
                     """
                     INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, source)
@@ -114,7 +81,7 @@ def load_seed_universe(conn: sqlite3.Connection, seed_path: Path) -> int:
                     """,
                     (symbol, holding_symbol, rank),
                 )
-            count += 1
+        count += 1
     conn.commit()
     return count
 
@@ -132,30 +99,59 @@ def load_portfolio_csv(conn: sqlite3.Connection, portfolio_name: str, portfolio_
     portfolio_id = conn.execute("SELECT id FROM portfolio WHERE name = ?", (portfolio_name,)).fetchone()["id"]
     conn.execute("DELETE FROM portfolio_position WHERE portfolio_id = ?", (portfolio_id,))
 
-    with portfolio_path.open("r", encoding="utf-8-sig", newline="") as csv_file:
-        reader = csv.DictReader(csv_file)
-        count = 0
-        for row in reader:
-            symbol = (row.get("Symbol") or row.get("Ticker") or "").strip().upper()
-            if not symbol:
-                continue
-            raw_value = row.get("Market Value") or row.get("Value") or row.get("Amount") or "0"
-            market_value = parse_money(raw_value)
-            conn.execute(
-                """
-                INSERT INTO portfolio_position (
-                    portfolio_id, symbol, description, asset_type, market_value, notes
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    portfolio_id,
-                    symbol,
-                    row.get("Description", ""),
-                    normalize_asset_type(row.get("Asset Type", "ETF")),
-                    market_value,
-                    row.get("Notes", ""),
-                ),
-            )
-            count += 1
+    count = 0
+    for position in PortfolioCsvProvider().import_file(portfolio_path):
+        conn.execute(
+            """
+            INSERT INTO portfolio_position (
+                portfolio_id, symbol, description, asset_type, market_value, notes
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                portfolio_id,
+                position["symbol"],
+                position["description"],
+                position["asset_type"],
+                position["market_value"],
+                position["notes"],
+            ),
+        )
+        count += 1
     conn.commit()
     return count
+
+
+def load_fund_holdings(conn: sqlite3.Connection, etf_symbol: str, path: Path) -> int:
+    """Import an issuer holdings-with-weights CSV, replacing prior holdings for the fund.
+
+    Parses ``path`` with :class:`~atlas.providers.holdings_file.HoldingsFileProvider`,
+    deletes all existing ``etf_holding`` rows for the fund (both sources), then
+    inserts the parsed rows tagged ``source='holdings_file'`` with ``rank``
+    assigned 1..N by descending weight. Re-import fully replaces rather than
+    accumulating. Imported holdings always outrank the seed top-ten list (see
+    ``load_seed_universe``).
+
+    Inserts a minimal ``etf`` row for the symbol (description ``''``) if one
+    does not already exist, since ``etf_holding`` has a foreign key to
+    ``etf(symbol)`` and holdings may be imported for a fund outside the seed
+    universe. Returns the number of holdings stored.
+    """
+    symbol = etf_symbol.strip().upper()
+    holdings = sorted(HoldingsFileProvider(path).iter_holdings(), key=lambda h: h.weight, reverse=True)
+
+    conn.execute(
+        "INSERT INTO etf (symbol, description) VALUES (?, ?) ON CONFLICT(symbol) DO NOTHING",
+        (symbol, ""),
+    )
+    conn.execute("DELETE FROM etf_holding WHERE etf_symbol = ?", (symbol,))
+    for rank, holding in enumerate(holdings, start=1):
+        conn.execute(
+            """
+            INSERT INTO etf_holding (
+                etf_symbol, holding_symbol, holding_name, rank, weight, source
+            ) VALUES (?, ?, ?, ?, ?, 'holdings_file')
+            """,
+            (symbol, holding.holding_symbol, holding.holding_name, rank, holding.weight),
+        )
+    conn.commit()
+    return len(holdings)

@@ -26,7 +26,9 @@ uv run atlas import-seed --seed data/atlas_seed_universe.csv
 uv run atlas score-etfs                            # heuristic ETF scores
 uv run atlas compare-overlap SPY QQQ               # top-ten holdings overlap
 uv run atlas import-portfolio examples/sample_portfolio.csv
-uv run atlas analyze-portfolio                     # estimate hidden concentration
+uv run atlas import-holdings SYMBOL FILE           # import issuer holdings with real weights
+uv run atlas coverage                              # how much of the universe/portfolio has real weights
+uv run atlas analyze-portfolio                     # exact direct + weighted look-through concentration
 uv run atlas generate-report                       # portable Markdown research report
 uv run atlas journal-add SYM --decision buy --thesis "..."
 ```
@@ -58,7 +60,7 @@ The actual investment features live outside the Kernel and are wired together by
 
 ### `core/` — aspirational abstractions (mostly not yet wired in)
 
-`core/` (scoring, decisions, evidence, themes), `models/domain.py`, and `providers/base.py` define stable, framework-free abstractions (`ExplainableScore`, `InvestmentThesis`, `ResearchDataProvider`, etc.) intended to be the durable domain model as Atlas grows. **These are largely not yet used by the running code** — the live path uses `scoring/engine.py` and raw SQLite rows, not these types. Don't assume `core/` is the active implementation; check the CLI/web call graph.
+`core/` (scoring, decisions, evidence, themes), `models/domain.py`, and `providers/base.py` define stable, framework-free abstractions (`ExplainableScore`, `InvestmentThesis`, `ResearchDataProvider`, etc.) intended to be the durable domain model as Atlas grows. `providers/base.py`'s interfaces (`ResearchDataProvider`, `PortfolioImportProvider`, `FundHoldingsProvider`) are now implemented and on the live path (`providers/seed_universe.py`, `providers/portfolio_files.py`, `providers/holdings_file.py`). **`core/` itself and `models/domain.py` are still largely not used by the running code** — the live path uses `scoring/engine.py` and raw SQLite rows, not these types. Don't assume `core/` is the active implementation; check the CLI/web call graph.
 
 ## Governance & docs
 

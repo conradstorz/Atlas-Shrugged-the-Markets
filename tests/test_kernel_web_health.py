@@ -15,4 +15,4 @@ def test_health_ready_and_version_endpoints() -> None:
     assert version.status_code == 200
     assert health.json()["ready"] is True
     assert ready.json()["status"] == "ok"
-    assert version.json()["version"] == "0.7.0"
+    assert version.json()["version"] == "0.8.0"

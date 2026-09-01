@@ -2,7 +2,7 @@ from pathlib import Path
 
 from atlas.analytics.overlap import compare_etfs, top_repeated_holdings
 from atlas.db.database import connect, load_portfolio_csv, load_seed_universe
-from atlas.portfolio.analysis import portfolio_hidden_concentration, summarize_portfolio
+from atlas.portfolio.analysis import combined_concentration, summarize_portfolio
 from atlas.scoring.engine import score_all
 
 
@@ -46,8 +46,13 @@ def test_portfolio_import_and_concentration(tmp_path: Path) -> None:
     load_seed_universe(conn, Path("data/atlas_seed_universe.csv"))
     loaded = load_portfolio_csv(conn, "Primary", portfolio_csv)
     summary = summarize_portfolio(conn, "Primary")
-    concentration = portfolio_hidden_concentration(conn, "Primary")
+    concentration = combined_concentration(conn, "Primary")
     assert loaded == 3
     assert summary.position_count == 3
     assert summary.total_value == 90000
-    assert concentration
+    assert concentration.total_value == 90000
+    # All three seed ETFs are weightless (no `holdings_file` rows), so the
+    # weighted look-through engine must not fall back to equal-weight
+    # estimation: no lines, entire value unmodeled.
+    assert concentration.lines == []
+    assert concentration.unmodeled_fund_value == 90000.0

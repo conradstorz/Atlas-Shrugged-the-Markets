@@ -7,17 +7,18 @@ from pathlib import Path
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse, PlainTextResponse
 
-from atlas.analytics.overlap import top_repeated_holdings
+from atlas.analytics.overlap import holdings_weight_source, top_repeated_holdings, top_ten_holdings
 from atlas.application.kernel import ATLAS_VERSION, AtlasKernel
 from atlas.plugins.hello import HelloAtlasPlugin
 from atlas.db.database import connect, load_seed_universe
 from atlas.reports.markdown import build_research_report
 from atlas.scoring.engine import read_scores, score_all
+from atlas.scoring.model import SCORER_VERSION
 
 DEFAULT_DB = Path(".atlas/atlas.db")
 DEFAULT_SEED = Path("data/atlas_seed_universe.csv")
 
-app = FastAPI(title="Atlas", version="0.7.0")
+app = FastAPI(title="Atlas", version="0.8.0")
 
 
 def _kernel_report() -> dict[str, object]:
@@ -135,12 +136,12 @@ def dashboard() -> str:
         <p><strong>{etf_count}</strong> ETFs loaded. <strong>{score_count}</strong> ETFs scored.</p>
       </section>
       <section class="card">
-        <h2>Top Repeated Seed Holdings</h2>
+        <h2>Top Repeated Top-Ten Holdings</h2>
         <table><thead><tr><th>Holding</th><th>ETF Count</th><th>ETFs</th></tr></thead><tbody>{rows}</tbody></table>
       </section>
       <section class="card">
         <h2>Next Atlas Milestone</h2>
-        <p>Replace seed top-ten holdings with full holdings from public data sources, while keeping personal portfolio data private and local.</p>
+        <p>Real weighted holdings can now be imported per fund with <code>atlas import-holdings</code>. Next: raise coverage across the universe, and add weighted overlap math, while keeping personal portfolio data private and local.</p>
       </section>
     """
     return _page("Dashboard", body)
@@ -165,7 +166,7 @@ def etfs(limit: int = Query(50, ge=1, le=200)) -> str:
     )
     body = f"""
       <h2>ETF Scores</h2>
-      <p class="muted">These are v0.5 heuristic scores. Every score remains explainable and subject to refinement.</p>
+      <p class="muted">These are {SCORER_VERSION} heuristic scores. Every score remains explainable and subject to refinement.</p>
       <table>
         <thead><tr><th>Rank</th><th>ETF</th><th>Score</th><th>Role</th><th>AI</th><th>Resilience</th><th>Cost</th><th>Diversification</th></tr></thead>
         <tbody>{rows}</tbody>
@@ -182,10 +183,16 @@ def etf_detail(symbol: str) -> str:
     row = conn.execute("SELECT * FROM etf WHERE symbol = ?", (symbol,)).fetchone()
     if score is None or row is None:
         return _page("ETF Not Found", f"<h2>{escape(symbol)} not found</h2>")
-    holdings = conn.execute(
-        "SELECT holding_symbol FROM etf_holding WHERE etf_symbol = ? ORDER BY rank", (symbol,)
-    ).fetchall()
-    holding_items = "".join(f"<li>{escape(h['holding_symbol'])}</li>" for h in holdings) or "<li>No seed holdings parsed.</li>"
+    holdings = top_ten_holdings(conn, symbol)
+    holding_items = (
+        "".join(f"<li>{escape(holding)}</li>" for holding in holdings)
+        or "<li>No holdings parsed.</li>"
+    )
+    holdings_basis = {
+        "holdings_file": "Top ten by weight, from an imported holdings file.",
+        "seed_top_ten": "Seed select-list top-ten membership; no weights. "
+        "Run <code>atlas import-holdings</code> for this fund to use its real weights.",
+    }.get(holdings_weight_source(conn, symbol), "No holdings on file for this fund.")
     body = f"""
       <h2>{escape(symbol)} — {escape(row['description'])}</h2>
       <section class="card">
@@ -201,6 +208,7 @@ def etf_detail(symbol: str) -> str:
       </section>
       <section class="card">
         <h3>Parsed Top-Ten Holdings</h3>
+        <p class="muted">{holdings_basis}</p>
         <ol>{holding_items}</ol>
       </section>
     """
@@ -217,7 +225,7 @@ def concentration(limit: int = Query(30, ge=1, le=100)) -> str:
     )
     body = f"""
       <h2>Repeated Holdings</h2>
-      <p class="muted">This is the first hidden-concentration warning system. It currently uses only parsed seed top-ten holdings.</p>
+      <p class="muted">This is the first hidden-concentration warning system. It counts how many funds hold each name in their top ten &mdash; real top ten by weight where a holdings file has been imported, seed select-list top ten otherwise. It counts fund membership only and shows no dollar exposure; for dollars, see <code>atlas analyze-portfolio</code>.</p>
       <table><thead><tr><th>Holding</th><th>ETF Count</th><th>ETFs</th></tr></thead><tbody>{table_rows}</tbody></table>
     """
     return _page("Repeated Holdings", body)

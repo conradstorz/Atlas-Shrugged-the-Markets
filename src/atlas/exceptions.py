@@ -15,3 +15,7 @@ class AtlasSecretError(AtlasError):
 
 class AtlasPluginError(AtlasError):
     """Raised when a plugin cannot be validated or initialized."""
+
+
+class AtlasDataError(AtlasError):
+    """Raised when an imported data file is malformed or misinterpreted."""

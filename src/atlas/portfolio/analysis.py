@@ -41,47 +41,6 @@ def summarize_portfolio(conn: sqlite3.Connection, portfolio_name: str) -> Portfo
     )
 
 
-def portfolio_hidden_concentration(conn: sqlite3.Connection, portfolio_name: str, limit: int = 25) -> list[sqlite3.Row]:
-    """Estimate hidden concentration using parsed ETF top-ten holdings.
-
-    Because v0.3 seed holdings do not include holding weights, each top-ten holding is
-    treated as equal inside that ETF's top-ten list. This is not final portfolio math;
-    it is the first private-server proof of concept for hidden overlap.
-    """
-    portfolio = conn.execute("SELECT id FROM portfolio WHERE name = ?", (portfolio_name,)).fetchone()
-    if portfolio is None:
-        raise ValueError(f"Portfolio not found: {portfolio_name}")
-    return conn.execute(
-        """
-        WITH position_total AS (
-            SELECT SUM(market_value) AS total_value
-            FROM portfolio_position
-            WHERE portfolio_id = :portfolio_id
-        ),
-        top_ten_counts AS (
-            SELECT etf_symbol, COUNT(*) AS holding_count
-            FROM etf_holding
-            GROUP BY etf_symbol
-        )
-        SELECT
-            h.holding_symbol,
-            COUNT(DISTINCT p.symbol) AS appears_in_positions,
-            ROUND(SUM((p.market_value / position_total.total_value) / top_ten_counts.holding_count) * 100, 2) AS estimated_portfolio_percent,
-            GROUP_CONCAT(DISTINCT p.symbol) AS source_etfs
-        FROM portfolio_position p
-        JOIN position_total
-        JOIN etf_holding h ON h.etf_symbol = p.symbol
-        JOIN top_ten_counts ON top_ten_counts.etf_symbol = p.symbol
-        WHERE p.portfolio_id = :portfolio_id
-          AND position_total.total_value > 0
-        GROUP BY h.holding_symbol
-        ORDER BY estimated_portfolio_percent DESC, holding_symbol
-        LIMIT :limit
-        """,
-        {"portfolio_id": portfolio["id"], "limit": limit},
-    ).fetchall()
-
-
 @dataclass(frozen=True)
 class ConcentrationLine:
     symbol: str
@@ -93,10 +52,110 @@ class ConcentrationLine:
 
 
 @dataclass(frozen=True)
+class FundCoverage:
+    """How much of a fund position's value Atlas can actually see through.
+
+    ``has_weights`` is true only when the fund has real weighted holdings
+    (``etf_holding.source = 'holdings_file'``); a seed-only top-ten list is
+    membership without weights and is never enough to model a fund.
+    """
+
+    symbol: str
+    market_value: float
+    has_weights: bool
+    modeled_share: float
+    modeled_value: float
+
+
+@dataclass(frozen=True)
 class ConcentrationReport:
     lines: list[ConcentrationLine]
     total_value: float
+    modeled_value: float
     unmodeled_fund_value: float
+    cash_value: float
+    other_value: float
+    fund_coverage: list[FundCoverage]
+
+
+def _empty_report() -> ConcentrationReport:
+    return ConcentrationReport(
+        lines=[],
+        total_value=0.0,
+        modeled_value=0.0,
+        unmodeled_fund_value=0.0,
+        cash_value=0.0,
+        other_value=0.0,
+        fund_coverage=[],
+    )
+
+
+@dataclass(frozen=True)
+class UniverseCoverage:
+    """How much of the entire ``etf`` universe Atlas can see through.
+
+    Every fund in ``etf`` falls into exactly one of three buckets, so the
+    three subcategories always sum to ``total_funds``:
+
+    - ``weighted_funds``: has at least one ``etf_holding`` row with
+      ``source = 'holdings_file'`` (real weights, from ``atlas import-holdings``).
+    - ``membership_only_funds``: has ``etf_holding`` rows, but none of them
+      are weighted — a seed top-ten membership list only.
+    - ``no_holdings_funds``: has no ``etf_holding`` rows at all.
+    """
+
+    total_funds: int
+    weighted_funds: int
+    membership_only_funds: int
+    no_holdings_funds: int
+
+
+def universe_coverage(conn: sqlite3.Connection) -> UniverseCoverage:
+    """Partition every fund in the ``etf`` table by how much Atlas can model it.
+
+    This is a universe-wide count, independent of any portfolio: it answers
+    "how much of what Atlas knows about is actually weighted" rather than
+    "how much of my money is modeled" (that is ``fund_coverage`` on a
+    ``ConcentrationReport``).
+    """
+    total_funds = int(conn.execute("SELECT COUNT(*) AS c FROM etf").fetchone()["c"])
+    weighted_funds = int(
+        conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM etf e
+            WHERE EXISTS (
+                SELECT 1 FROM etf_holding h
+                WHERE h.etf_symbol = e.symbol AND h.source = 'holdings_file'
+            )
+            """
+        ).fetchone()["c"]
+    )
+    membership_only_funds = int(
+        conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM etf e
+            WHERE EXISTS (SELECT 1 FROM etf_holding h WHERE h.etf_symbol = e.symbol)
+              AND NOT EXISTS (
+                  SELECT 1 FROM etf_holding h
+                  WHERE h.etf_symbol = e.symbol AND h.source = 'holdings_file'
+              )
+            """
+        ).fetchone()["c"]
+    )
+    no_holdings_funds = int(
+        conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM etf e
+            WHERE NOT EXISTS (SELECT 1 FROM etf_holding h WHERE h.etf_symbol = e.symbol)
+            """
+        ).fetchone()["c"]
+    )
+    return UniverseCoverage(
+        total_funds=total_funds,
+        weighted_funds=weighted_funds,
+        membership_only_funds=membership_only_funds,
+        no_holdings_funds=no_holdings_funds,
+    )
 
 
 def combined_concentration(
@@ -104,10 +163,15 @@ def combined_concentration(
 ) -> ConcentrationReport:
     """Estimate per-name exposure combining direct holdings and fund look-through.
 
-    Direct ``equity`` positions contribute their full market value. ``etf`` and
-    ``mutual_fund`` positions with parsed top-ten holdings distribute their value
-    equally across those holdings (equal-weight prototype). Fund value with no
-    parsed holdings is reported as ``unmodeled_fund_value``.
+    Direct ``equity`` positions contribute their full market value; that math
+    is exact. ``etf`` and ``mutual_fund`` positions look through to their
+    ``etf_holding`` rows: where a fund has real weighted holdings
+    (``source = 'holdings_file'``), each holding receives
+    ``market_value * weight / 100`` and the fund's modeled share is
+    ``SUM(weight) / 100``. Any remainder — including the entire value of a
+    fund with only unweighted seed top-ten membership rows, or no holdings at
+    all — is reported as ``unmodeled_fund_value`` rather than estimated.
+    Atlas never spreads a fund's value equally across an unweighted list.
     """
     portfolio = conn.execute(
         "SELECT id FROM portfolio WHERE name = ?", (portfolio_name,)
@@ -123,12 +187,9 @@ def combined_concentration(
         ).fetchone()["total"]
     )
     if total_value <= 0:
-        return ConcentrationReport(lines=[], total_value=0.0, unmodeled_fund_value=0.0)
+        return _empty_report()
 
     direct: dict[str, float] = {}
-    lookthrough: dict[str, float] = {}
-    sources: dict[str, set[str]] = {}
-
     for row in conn.execute(
         "SELECT symbol, market_value FROM portfolio_position "
         "WHERE portfolio_id = ? AND asset_type = 'equity'",
@@ -136,25 +197,82 @@ def combined_concentration(
     ):
         direct[row["symbol"]] = direct.get(row["symbol"], 0.0) + float(row["market_value"])
 
+    cash_value = float(
+        conn.execute(
+            "SELECT COALESCE(SUM(market_value), 0) AS total FROM portfolio_position "
+            "WHERE portfolio_id = ? AND asset_type = 'cash'",
+            (portfolio_id,),
+        ).fetchone()["total"]
+    )
+    other_value = float(
+        conn.execute(
+            "SELECT COALESCE(SUM(market_value), 0) AS total FROM portfolio_position "
+            "WHERE portfolio_id = ? AND asset_type NOT IN ('equity', 'etf', 'mutual_fund', 'cash')",
+            (portfolio_id,),
+        ).fetchone()["total"]
+    )
+
+    lookthrough: dict[str, float] = {}
+    sources: dict[str, set[str]] = {}
+    fund_coverage: list[FundCoverage] = []
     unmodeled_fund_value = 0.0
+
     funds = conn.execute(
         "SELECT symbol, market_value FROM portfolio_position "
         "WHERE portfolio_id = ? AND asset_type IN ('etf', 'mutual_fund')",
         (portfolio_id,),
     ).fetchall()
     for fund in funds:
-        holdings = conn.execute(
-            "SELECT holding_symbol FROM etf_holding WHERE etf_symbol = ?",
-            (fund["symbol"],),
+        fund_symbol = fund["symbol"]
+        fund_value = float(fund["market_value"])
+        weighted_holdings = conn.execute(
+            "SELECT holding_symbol, weight FROM etf_holding "
+            "WHERE etf_symbol = ? AND source = 'holdings_file' AND weight IS NOT NULL",
+            (fund_symbol,),
         ).fetchall()
-        if not holdings:
-            unmodeled_fund_value += float(fund["market_value"])
-            continue
-        share = float(fund["market_value"]) / len(holdings)
-        for holding in holdings:
-            symbol = holding["holding_symbol"]
-            lookthrough[symbol] = lookthrough.get(symbol, 0.0) + share
-            sources.setdefault(symbol, set()).add(fund["symbol"])
+
+        if weighted_holdings:
+            total_weight = sum(float(h["weight"]) for h in weighted_holdings)
+            # Issuer files routinely round to a total a hair off 100%, and the
+            # ingest guard admits anything up to 100.5. Taken literally, a file
+            # summing to 100.3 would model $10,030 of a $10,000 position and
+            # report 100.30% coverage against a -$30.00 unmodeled remainder.
+            # Normalize the excess away instead: the weights are relative, and
+            # the surplus is rounding noise, not exposure. A total UNDER 100 is
+            # left alone — there the shortfall is genuinely unmodeled fund.
+            excess_scale = 100.0 / total_weight if total_weight > 100.0 else 1.0
+            modeled_share = min(total_weight / 100.0, 1.0)
+            modeled_value = fund_value * modeled_share
+            for holding in weighted_holdings:
+                symbol = holding["holding_symbol"]
+                contribution = fund_value * float(holding["weight"]) / 100.0 * excess_scale
+                lookthrough[symbol] = lookthrough.get(symbol, 0.0) + contribution
+                sources.setdefault(symbol, set()).add(fund_symbol)
+            unmodeled_fund_value += fund_value - modeled_value
+            fund_coverage.append(
+                FundCoverage(
+                    symbol=fund_symbol,
+                    market_value=round(fund_value, 2),
+                    has_weights=True,
+                    modeled_share=modeled_share,
+                    modeled_value=round(modeled_value, 2),
+                )
+            )
+        else:
+            # Seed-only membership (or no holdings at all): produce no
+            # equal-weight estimate. The fund contributes nothing to `lines`.
+            unmodeled_fund_value += fund_value
+            fund_coverage.append(
+                FundCoverage(
+                    symbol=fund_symbol,
+                    market_value=round(fund_value, 2),
+                    has_weights=False,
+                    modeled_share=0.0,
+                    modeled_value=0.0,
+                )
+            )
+
+    fund_coverage.sort(key=lambda fc: (-fc.market_value, fc.symbol))
 
     lines: list[ConcentrationLine] = []
     for symbol in set(direct) | set(lookthrough):
@@ -172,8 +290,15 @@ def combined_concentration(
             )
         )
     lines.sort(key=lambda line: (-line.exposure_percent, line.symbol))
+
+    modeled_value = sum(direct.values()) + sum(lookthrough.values())
+
     return ConcentrationReport(
         lines=lines[:limit],
         total_value=round(total_value, 2),
+        modeled_value=round(modeled_value, 2),
         unmodeled_fund_value=round(unmodeled_fund_value, 2),
+        cash_value=round(cash_value, 2),
+        other_value=round(other_value, 2),
+        fund_coverage=fund_coverage,
     )

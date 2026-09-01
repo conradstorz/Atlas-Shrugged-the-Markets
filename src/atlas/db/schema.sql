@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS etf_holding (
     holding_symbol TEXT NOT NULL,
     holding_name TEXT,
     rank INTEGER NOT NULL,
-    weight REAL,
+    weight REAL, -- percent of fund, e.g. 6.83 means 6.83%; NULL for seed select-list rows (symbols only)
     source TEXT NOT NULL DEFAULT 'seed_top_ten',
     PRIMARY KEY (etf_symbol, holding_symbol)
 );
