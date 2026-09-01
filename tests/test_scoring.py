@@ -51,3 +51,8 @@ def test_portfolio_import_and_concentration(tmp_path: Path) -> None:
     assert summary.position_count == 3
     assert summary.total_value == 90000
     assert concentration.total_value == 90000
+    # All three seed ETFs are weightless (no `holdings_file` rows), so the
+    # weighted look-through engine must not fall back to equal-weight
+    # estimation: no lines, entire value unmodeled.
+    assert concentration.lines == []
+    assert concentration.unmodeled_fund_value == 90000.0

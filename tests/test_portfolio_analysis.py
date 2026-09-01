@@ -268,3 +268,23 @@ def test_combined_concentration_missing_portfolio_raises(tmp_path: Path) -> None
     conn = connect(tmp_path / "atlas.db")
     with pytest.raises(ValueError):
         combined_concentration(conn, "nope")
+
+
+def test_lookthrough_accumulates_across_multiple_funds(tmp_path: Path) -> None:
+    """One symbol reached through two different weighted funds must sum its
+    contributions into a single line and list every contributing fund."""
+    conn = connect(tmp_path / "atlas.db")
+    _add_weighted_holdings(conn, "F1", [("NVDA", 10.0)])
+    _add_weighted_holdings(conn, "F2", [("NVDA", 20.0)])
+    _add_portfolio(
+        conn,
+        "P",
+        [("F1", 1000, "etf"), ("F2", 1000, "etf")],
+    )
+
+    report = combined_concentration(conn, "P")
+    by_symbol = {line.symbol: line for line in report.lines}
+
+    assert by_symbol["NVDA"].lookthrough_value == 300.00
+    assert by_symbol["NVDA"].direct_value == 0.00
+    assert by_symbol["NVDA"].source_funds == ["F1", "F2"]
