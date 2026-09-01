@@ -20,9 +20,11 @@ FULL_COVERAGE_THRESHOLD = 90.0
 # `etf_holding` mixes two kinds of row: seed select-list rows (membership only,
 # `weight IS NULL`, at most ten per fund) and imported holdings-file rows (real
 # weights, possibly hundreds per fund). Since imports stopped deleting seed
-# rows, one fund can carry both. Every consumer whose output is *defined* as a
-# top ten must see ten names, not every row a fund happens to have — and must
-# see them from ONE source, so the basis it reports is the basis it used.
+# rows, one fund can carry both — and since `source` joined the primary key,
+# one fund can carry both *for the same symbol*. Every consumer whose output is
+# *defined* as a top ten must see ten names, not every row a fund happens to
+# have — and must see them from ONE source, so the basis it reports is the
+# basis it used, and so a name held in both sources is counted once.
 #
 # The rule, per fund:
 #

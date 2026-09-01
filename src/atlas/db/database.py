@@ -3,11 +3,33 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from atlas.exceptions import AtlasError
 from atlas.providers.holdings_file import HoldingsFileProvider
 from atlas.providers.portfolio_files import PortfolioCsvProvider
 from atlas.providers.seed_universe import SeedUniverseProvider
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
+
+# The columns of `etf_holding`, named explicitly so the migration below copies
+# by name rather than by position. `SELECT *` would silently misfile every row
+# if the column order ever differed between the old table and the new one.
+ETF_HOLDING_COLUMNS = ("etf_symbol", "holding_symbol", "holding_name", "rank", "weight", "source")
+
+# `etf_holding` under the widened key, used only to rebuild an existing table.
+# Keep it identical to the definition in `schema.sql`, which is what a fresh
+# database is created from; `tests/test_holding_key_migration.py` compares the
+# two shapes so the pair cannot drift apart unnoticed.
+ETF_HOLDING_REBUILD_DDL = """
+CREATE TABLE etf_holding_new (
+    etf_symbol TEXT NOT NULL REFERENCES etf(symbol),
+    holding_symbol TEXT NOT NULL,
+    holding_name TEXT,
+    rank INTEGER NOT NULL,
+    weight REAL,
+    source TEXT NOT NULL DEFAULT 'seed_top_ten',
+    PRIMARY KEY (etf_symbol, holding_symbol, source)
+)
+"""
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -18,6 +40,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
     _repair_etf_score_schema(conn)
+    _widen_etf_holding_key(conn)
     return conn
 
 
@@ -48,6 +71,102 @@ def _repair_etf_score_schema(conn: sqlite3.Connection) -> None:
     # recreates exactly the one table that was just dropped.
     conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
     conn.commit()
+
+
+def _widen_etf_holding_key(conn: sqlite3.Connection) -> None:
+    """Rebuild `etf_holding` if its primary key predates the `source` column.
+
+    The key was `(etf_symbol, holding_symbol)`, which let a fund store only one
+    row per company. A fund's seed select-list membership and its imported
+    issuer weights are two different pieces of evidence about the same company,
+    and the narrow key forced them to fight over one slot: importing a partial
+    export of a fund's largest names destroyed exactly the seed rows that
+    defined its top ten. The key is now `(etf_symbol, holding_symbol, source)`.
+
+    `CREATE TABLE IF NOT EXISTS` in `schema.sql` cannot do this, because the
+    table already exists on an investor's database, and SQLite has no
+    `ALTER TABLE` that changes a primary key. The only way is to rebuild:
+    create the new table, copy every row into it, drop the old one, rename.
+
+    **No row is lost.** Unlike `_repair_etf_score_schema` above, which drops a
+    cache that `score_all` recomputes, `etf_holding` holds issuer holdings
+    files the investor downloaded by hand; Atlas cannot recreate a single one
+    of them. So the copy names its columns explicitly rather than using
+    `SELECT *`, the row count is asserted to be unchanged before the old table
+    is dropped and again after the rename, and the whole rebuild runs in one
+    transaction that rolls back — losing nothing — if either check fails.
+    `portfolio`, `portfolio_position` and `decision_journal_entry` are not
+    referenced here at all.
+
+    Foreign keys are disabled around the rebuild and restored to their prior
+    value afterwards, per SQLite's documented table-rebuild procedure: with
+    them enabled, `DROP TABLE` performs an implicit `DELETE FROM` that fires
+    referential actions, and `ALTER TABLE ... RENAME TO` rewrites references
+    to the renamed table elsewhere in the schema. The rebuilt table keeps its
+    own `REFERENCES etf(symbol)`, and `PRAGMA foreign_key_check` confirms
+    before the commit that the rebuild introduced no new orphan.
+
+    Self-detecting and idempotent: it reads the current key from
+    `PRAGMA table_info`, whose `pk` column is a column's 1-based position in
+    the primary key and 0 outside it. No version flag is consulted, so a
+    database that has already been rebuilt — or was created fresh on the
+    current schema — is left untouched.
+    """
+    columns = conn.execute("PRAGMA table_info(etf_holding)").fetchall()
+    if not columns:
+        return  # No such table yet; the schema script has just created it.
+    source_column = next((column for column in columns if column["name"] == "source"), None)
+    if source_column is None or source_column["pk"]:
+        # Either a shape this migration does not know how to widen, or the key
+        # already includes `source` and there is nothing to do.
+        return
+
+    conn.commit()  # Leave any implicit transaction before touching PRAGMAs.
+    foreign_keys_were_on = bool(conn.execute("PRAGMA foreign_keys").fetchone()[0])
+    # A PRAGMA is a no-op inside a transaction, so this must precede BEGIN.
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("BEGIN")
+        try:
+            before = conn.execute("SELECT COUNT(*) AS c FROM etf_holding").fetchone()["c"]
+            # Counted, not required to be zero: an orphan row that was already
+            # in the database is the investor's data too, and refusing to
+            # migrate — or worse, dropping it — would be the larger harm. What
+            # must not happen is the rebuild *introducing* one.
+            orphans_before = len(conn.execute("PRAGMA foreign_key_check(etf_holding)").fetchall())
+            conn.execute(ETF_HOLDING_REBUILD_DDL)
+            column_list = ", ".join(ETF_HOLDING_COLUMNS)
+            conn.execute(
+                f"INSERT INTO etf_holding_new ({column_list}) SELECT {column_list} FROM etf_holding"
+            )
+            copied = conn.execute("SELECT COUNT(*) AS c FROM etf_holding_new").fetchone()["c"]
+            if copied != before:
+                raise AtlasError(
+                    "Refusing to widen etf_holding: the copy holds "
+                    f"{copied} rows, not the {before} the table had. Nothing was changed."
+                )
+            conn.execute("DROP TABLE etf_holding")
+            conn.execute("ALTER TABLE etf_holding_new RENAME TO etf_holding")
+            after = conn.execute("SELECT COUNT(*) AS c FROM etf_holding").fetchone()["c"]
+            if after != before:
+                raise AtlasError(
+                    "Refusing to widen etf_holding: the rebuilt table holds "
+                    f"{after} rows, not the {before} it started with. Nothing was changed."
+                )
+            orphans_after = len(conn.execute("PRAGMA foreign_key_check(etf_holding)").fetchall())
+            if orphans_after != orphans_before:
+                raise AtlasError(
+                    "Refusing to widen etf_holding: the rebuilt table has "
+                    f"{orphans_after} row(s) referencing a missing etf, not the "
+                    f"{orphans_before} it started with. Nothing was changed."
+                )
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+    finally:
+        if foreign_keys_were_on:
+            conn.execute("PRAGMA foreign_keys = ON")
 
 
 def load_seed_universe(conn: sqlite3.Connection, seed_path: Path) -> int:
@@ -93,21 +212,29 @@ def load_seed_universe(conn: sqlite3.Connection, seed_path: Path) -> int:
             (symbol,),
         )
         for rank, holding_symbol in enumerate(fund["holding_symbols"], start=1):
-            # THE GUARD. `etf_holding` allows one row per (fund, symbol), so a
-            # seed symbol already occupied by an imported row lands here as a
-            # conflict. Without `WHERE etf_holding.source <> 'holdings_file'`
-            # this upsert would relabel that row seed_top_ten and overwrite its
-            # weight-order rank — on every `generate-report` and every web-app
-            # startup, silently converting real issuer data into membership
-            # data. The imported row keeps the slot instead; the seed symbol is
-            # simply not re-created as a separate row.
+            # The conflict target must name every column of the primary key,
+            # which is now (etf_symbol, holding_symbol, source). Naming only
+            # the first two is not a silent mistake — SQLite rejects a target
+            # that matches no unique constraint — but naming them and getting
+            # the *effect* wrong would be: this statement runs on every
+            # `generate-report` and every web-app startup, so an upsert that
+            # could reach a holdings_file row would convert real issuer data
+            # into membership data on a schedule.
+            #
+            # It cannot reach one. `source` is in the key and the inserted
+            # value is the literal 'seed_top_ten', so the only row this can
+            # ever conflict with is another seed row for the same fund and
+            # symbol — a fund listed twice in the seed CSV, where the later
+            # rank wins. The `WHERE` clause below therefore no longer has work
+            # to do; it stays as the local, explicit statement that nothing
+            # here rewrites imported holdings. That is enforced by the key now,
+            # not by this clause, which is the point of widening it.
             conn.execute(
                 """
                 INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, source)
                 VALUES (?, ?, ?, 'seed_top_ten')
-                ON CONFLICT(etf_symbol, holding_symbol) DO UPDATE SET
-                    rank=excluded.rank,
-                    source=excluded.source
+                ON CONFLICT(etf_symbol, holding_symbol, source) DO UPDATE SET
+                    rank=excluded.rank
                 WHERE etf_holding.source <> 'holdings_file'
                 """,
                 (symbol, holding_symbol, rank),
@@ -161,13 +288,16 @@ def load_fund_holdings(conn: sqlite3.Connection, etf_symbol: str, path: Path) ->
     assigned 1..N by descending weight. Re-import fully replaces the imported
     set rather than accumulating.
 
-    Seed select-list rows (``source='seed_top_ten'``) survive an import. They
-    are a different kind of evidence: membership in the fund's published top
-    ten, which a partial issuer export cannot replace. Deleting them used to
-    leave a fund whose "top ten" was however many rows the file happened to
-    contain, permanently. Which of the two sources a fund's top ten is drawn
-    from is decided at read time by :data:`~atlas.analytics.overlap.TOP_TEN_CTE`,
-    not by destroying rows here.
+    Seed select-list rows (``source='seed_top_ten'``) survive an import whole —
+    including rows for symbols the imported file also names. They are a
+    different kind of evidence: membership in the fund's published top ten,
+    which a partial issuer export cannot replace. Deleting them used to leave a
+    fund whose "top ten" was however many rows the file happened to contain,
+    permanently, and a partial export of a fund's *largest* names took exactly
+    the rows that mattered. ``etf_holding``'s key includes ``source``, so both
+    rows now exist for such a symbol. Which of the two sources a fund's top ten
+    is drawn from is decided at read time by
+    :data:`~atlas.analytics.overlap.TOP_TEN_CTE`, not by destroying rows here.
 
     Inserts a minimal ``etf`` row for the symbol (description ``''``) if one
     does not already exist, since ``etf_holding`` has a foreign key to
@@ -186,18 +316,12 @@ def load_fund_holdings(conn: sqlite3.Connection, etf_symbol: str, path: Path) ->
         (symbol,),
     )
     for rank, holding in enumerate(holdings, start=1):
-        # `etf_holding` is PRIMARY KEY (etf_symbol, holding_symbol), so the two
-        # sources cannot both hold a row for the same symbol. A name in both the
-        # seed top ten and the imported file is resolved in favour of the
-        # imported row: it carries the real weight that look-through
-        # concentration and the top-ten-by-weight rule are computed from, while
-        # the seed row carries membership and nothing else. The colliding seed
-        # row is deleted here, in the open, rather than being converted by an
-        # ON CONFLICT clause whose effect is easy to miss.
-        conn.execute(
-            "DELETE FROM etf_holding WHERE etf_symbol = ? AND holding_symbol = ?",
-            (symbol, holding.holding_symbol),
-        )
+        # No delete of the fund's other-source rows for this symbol. The key is
+        # PRIMARY KEY (etf_symbol, holding_symbol, source), so a name held in
+        # both the seed top ten and the imported file is stored twice, once per
+        # kind of evidence, and neither displaces the other. The `DELETE` above
+        # already cleared this fund's previous import, which is the only set an
+        # import is entitled to replace.
         conn.execute(
             """
             INSERT INTO etf_holding (

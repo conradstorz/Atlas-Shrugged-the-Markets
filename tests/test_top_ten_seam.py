@@ -333,16 +333,16 @@ def test_a_full_import_never_yields_a_hybrid_list(tmp_path: Path) -> None:
     assert holdings_weight_source(conn, "SCHB") == "holdings_file"
 
 
-def test_partial_import_overlapping_the_seed_list_shortens_it(tmp_path: Path) -> None:
-    """Known limit of the one-row-per-symbol schema, pinned so it cannot drift.
+def test_partial_import_overlapping_the_seed_list_leaves_it_whole(tmp_path: Path) -> None:
+    """Issue #5's headline symptom, inverted and pinned.
 
-    ``etf_holding`` is PRIMARY KEY (etf_symbol, holding_symbol), so a symbol
-    in both the seed top ten and a partial import cannot be stored twice. The
-    imported row wins the slot because it carries the real weight, and the
-    fund's seed fallback is that many names shorter. It is still the seed
-    list, still correctly labelled, and no longer destroyed wholesale — but a
-    partial export of a fund's largest names does still cost seed membership
-    rows. Widening the primary key is the fix, and is not in this change.
+    A partial export of a fund's *largest* names names exactly the symbols the
+    seed top ten is made of. Under the old
+    ``PRIMARY KEY (etf_symbol, holding_symbol)`` those three imported rows took
+    three seed slots, and SCHB's top ten came back seven names long — a short
+    file shrinking a fund's top ten, which is the defect. ``source`` is now part
+    of the key, so the two kinds of row coexist and the seed list survives at
+    its full length.
     """
     conn = connect(tmp_path / "atlas.db")
     load_seed_universe(conn, SEED)
@@ -352,8 +352,45 @@ def test_partial_import_overlapping_the_seed_list_shortens_it(tmp_path: Path) ->
         _write_holdings_csv(tmp_path / "overlap.csv", [(symbol, 6.0) for symbol in SCHB_SEED_TOP_TEN[:3]]),
     )
 
-    assert top_ten_holdings(conn, "SCHB") == SCHB_SEED_TOP_TEN[3:]
+    assert top_ten_holdings(conn, "SCHB") == SCHB_SEED_TOP_TEN
     assert holdings_weight_source(conn, "SCHB") == "seed_top_ten"
+
+    # Both kinds of row are present for the three overlapping symbols.
+    counts = {
+        row["source"]: row["c"]
+        for row in conn.execute(
+            "SELECT source, COUNT(*) AS c FROM etf_holding WHERE etf_symbol = 'SCHB' GROUP BY source"
+        )
+    }
+    assert counts == {"seed_top_ten": 10, "holdings_file": 3}
+
+
+def test_a_full_import_supersedes_without_consuming_the_seed_rows(tmp_path: Path) -> None:
+    """Supersession is a read-time choice; the seed rows stay on disk, untouched.
+
+    The imported file wins SCHB's top ten because it covers the whole fund, but
+    the seed membership list must still be there in full afterwards — deleting
+    a re-import later must not leave the fund with nothing.
+    """
+    conn = connect(tmp_path / "atlas.db")
+    load_seed_universe(conn, SEED)
+    # The heaviest names are the seed names themselves, so every seed row is a
+    # collision candidate under the old key.
+    load_fund_holdings(
+        conn,
+        "SCHB",
+        _write_holdings_csv(tmp_path / "full.csv", _full_holdings(SCHB_SEED_TOP_TEN, "T")),
+    )
+
+    assert top_ten_holdings(conn, "SCHB") == SCHB_SEED_TOP_TEN
+    assert holdings_weight_source(conn, "SCHB") == "holdings_file"
+
+    seed_rows = conn.execute(
+        "SELECT holding_symbol, weight FROM etf_holding "
+        "WHERE etf_symbol = 'SCHB' AND source = 'seed_top_ten' ORDER BY rank"
+    ).fetchall()
+    assert [row["holding_symbol"] for row in seed_rows] == SCHB_SEED_TOP_TEN
+    assert all(row["weight"] is None for row in seed_rows)
 
 
 def test_unrecognized_source_rows_are_a_last_resort(tmp_path: Path) -> None:

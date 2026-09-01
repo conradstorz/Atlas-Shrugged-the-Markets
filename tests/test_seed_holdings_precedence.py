@@ -30,8 +30,8 @@ DIVB_SEED_TOP_TEN = ["ADP", "IBM", "ACN", "JPM", "PAYX", "JNJ", "HPQ", "XOM", "A
 # ILCB's seed_top_ten list shares five symbols with the Invesco holdings
 # fixture below (NVDA, AAPL, MSFT, AMZN, META). That overlap is what makes
 # test_imported_holdings_survive_reseed a direct proof rather than an
-# indirect one: re-seeding actually hits
-# ON CONFLICT(etf_symbol, holding_symbol) for those five rows, instead of
+# indirect one: those five names are the ones the narrower
+# (etf_symbol, holding_symbol) key made the two sources fight over, instead of
 # merely adding unrelated seed rows alongside untouched holdings_file rows.
 ILCB_SEED_TOP_TEN = ["NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "AVGO", "GOOG", "META", "TSLA", "MU"]
 ILCB_SHARED_WITH_INVESCO = ["NVDA", "AAPL", "MSFT", "AMZN", "META"]
@@ -52,24 +52,30 @@ def test_imported_holdings_survive_reseed(tmp_path: Path) -> None:
     assert imported[-1]["weight"] == -1.20
 
     # NVDA sits in both the imported holdings fixture and ILCB's seed
-    # top-ten list, so this row is the one whose ON CONFLICT resolution
-    # actually matters: assert directly that it kept its holdings_file
-    # source and its real weight rather than being silently relabeled
-    # seed_top_ten with a stale (missing) weight.
-    nvda_row = conn.execute(
-        "SELECT weight, source FROM etf_holding WHERE etf_symbol = 'ILCB' AND holding_symbol = 'NVDA'"
-    ).fetchone()
-    assert nvda_row["source"] == "holdings_file"
-    assert nvda_row["weight"] == 9.50
+    # top-ten list, so it is the name whose ON CONFLICT resolution actually
+    # matters. Since `source` joined the primary key it carries two rows —
+    # one per kind of evidence — and the assertion is that re-seeding wrote
+    # the seed one and left the imported one exactly as the import stored it,
+    # rather than relabeling it seed_top_ten with a stale (missing) weight.
+    nvda_rows = conn.execute(
+        "SELECT weight, source FROM etf_holding "
+        "WHERE etf_symbol = 'ILCB' AND holding_symbol = 'NVDA' ORDER BY source"
+    ).fetchall()
+    assert [(row["source"], row["weight"]) for row in nvda_rows] == [
+        ("holdings_file", 9.50),
+        ("seed_top_ten", None),
+    ]
 
 
-def test_reseed_restores_seed_rows_alongside_imported_holdings(tmp_path: Path) -> None:
+def test_reseed_restores_the_whole_seed_list_alongside_imported_holdings(tmp_path: Path) -> None:
     """Seeding no longer skips a fund merely because it has imported holdings.
 
     Skipping it was the old defence against relabeling, and it left an
-    imported fund with no seed membership at all. The fund now carries both:
-    every seed symbol not occupied by an imported row is present as a
-    ``seed_top_ten`` row.
+    imported fund with no seed membership at all. Then the fund carried both,
+    but a symbol in the import cost the fund that seed row, because the key
+    allowed only one row per (fund, symbol). With ``source`` in the key the
+    fund gets its whole published top ten back — including the five symbols
+    the Invesco fixture also names.
     """
     conn = connect(tmp_path / "atlas.db")
     load_fund_holdings(conn, "ILCB", INVESCO)
@@ -79,8 +85,9 @@ def test_reseed_restores_seed_rows_alongside_imported_holdings(tmp_path: Path) -
         "SELECT holding_symbol FROM etf_holding "
         "WHERE etf_symbol = 'ILCB' AND source = 'seed_top_ten' ORDER BY rank"
     ).fetchall()
-    expected = [s for s in ILCB_SEED_TOP_TEN if s not in ILCB_SHARED_WITH_INVESCO]
-    assert [row["holding_symbol"] for row in seed_rows] == expected
+    assert [row["holding_symbol"] for row in seed_rows] == ILCB_SEED_TOP_TEN
+    # The five shared names are exactly the ones the old key could not keep.
+    assert set(ILCB_SHARED_WITH_INVESCO).issubset({row["holding_symbol"] for row in seed_rows})
 
 
 def test_reseed_gives_a_non_colliding_fund_its_whole_seed_top_ten(tmp_path: Path) -> None:

@@ -221,12 +221,13 @@ def test_reimport_replaces_only_the_imported_rows(tmp_path: Path) -> None:
     assert counts == {"seed_top_ten": 10, "holdings_file": 4}
 
 
-def test_import_supersedes_a_colliding_seed_row(tmp_path: Path) -> None:
-    """`etf_holding` allows one row per (fund, symbol); the imported row wins it.
+def test_import_coexists_with_a_colliding_seed_row(tmp_path: Path) -> None:
+    """`etf_holding` is keyed by (fund, symbol, source): both rows survive.
 
-    The seed row carries membership only; the imported row carries the real
-    weight every downstream number depends on, so the imported row takes the
-    slot. It must not raise, and it must not leave a seed-labelled row with a
+    Membership in the fund's published top ten and the fund's real weight for
+    that company are two different pieces of evidence about the same name, and
+    a partial import is not entitled to destroy the first to record the second.
+    The import must not raise, and it must not leave a seed-labelled row with a
     weight attached.
     """
     conn = connect(tmp_path / "atlas.db")
@@ -236,15 +237,16 @@ def test_import_supersedes_a_colliding_seed_row(tmp_path: Path) -> None:
 
     aapl = conn.execute(
         "SELECT weight, source FROM etf_holding "
-        "WHERE etf_symbol = 'SCHB' AND holding_symbol = 'AAPL'"
+        "WHERE etf_symbol = 'SCHB' AND holding_symbol = 'AAPL' ORDER BY source"
     ).fetchall()
-    assert len(aapl) == 1
-    assert aapl[0]["source"] == "holdings_file"
+    assert [row["source"] for row in aapl] == ["holdings_file", "seed_top_ten"]
     assert aapl[0]["weight"] == pytest.approx(7.03)
-    # The seed-only name is untouched.
+    assert aapl[1]["weight"] is None
+    # The seed-only name is untouched and gained no imported twin.
     other = conn.execute(
         "SELECT weight, source FROM etf_holding "
         "WHERE etf_symbol = 'SCHB' AND holding_symbol = 'OTHER'"
-    ).fetchone()
-    assert other["source"] == "seed_top_ten"
-    assert other["weight"] is None
+    ).fetchall()
+    assert len(other) == 1
+    assert other[0]["source"] == "seed_top_ten"
+    assert other[0]["weight"] is None
