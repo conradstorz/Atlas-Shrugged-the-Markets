@@ -1,0 +1,10 @@
+iShares Core S&P 500 ETF
+As of 08/29/2026
+
+Ticker,Name,Sector,Asset Class,Weight (%)
+NVDA,NVIDIA Corp,Information Technology,Equity,"6.83%"
+AAPL,Apple Inc,Information Technology,Equity,6.50
+MSFT,Microsoft Corp,Information Technology,Equity,6.10
+--,U.S. Dollar,Cash,Cash,0.05
+GOOGL,Alphabet Inc Class A,Communication Services,Equity,3.50
+Total,,,,100.00

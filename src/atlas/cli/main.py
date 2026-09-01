@@ -8,7 +8,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from atlas.analytics.overlap import compare_etfs, top_repeated_holdings
-from atlas.db.database import connect, load_portfolio_csv, load_seed_universe
+from atlas.db.database import connect, load_fund_holdings, load_portfolio_csv, load_seed_universe
 from atlas.journal.service import add_journal_entry, list_journal_entries
 from atlas.portfolio.analysis import combined_concentration, summarize_portfolio
 from atlas.portfolio.schwab import load_schwab_positions
@@ -133,6 +133,27 @@ def import_schwab(
         f"Total: ${summary.total_value:,.2f} — equity ${summary.equity_value:,.2f}, "
         f"funds ${summary.fund_value:,.2f}, cash ${summary.cash_value:,.2f}"
     )
+
+
+@app.command("import-holdings")
+def import_holdings(
+    symbol: str = typer.Argument(..., help="ETF ticker to import holdings for."),
+    holdings_csv: Path = typer.Argument(..., help="Issuer fund holdings CSV export (with weights)."),
+    db: Path = typer.Option(Path(".atlas/atlas.db"), help="SQLite database path."),
+) -> None:
+    """Import an issuer fund-holdings CSV (with weights) for one ETF."""
+    conn = connect(db)
+    symbol = symbol.strip().upper()
+    count = load_fund_holdings(conn, symbol, holdings_csv)
+    if count == 0:
+        console.print(f"Imported 0 holdings for {symbol}. No usable rows were found in {holdings_csv}.")
+        return
+    total_weight = conn.execute(
+        "SELECT COALESCE(SUM(weight), 0) AS total FROM etf_holding "
+        "WHERE etf_symbol = ? AND source = 'holdings_file'",
+        (symbol,),
+    ).fetchone()["total"]
+    console.print(f"Imported {count} holdings for {symbol} ({total_weight:.2f}% of fund by weight).")
 
 
 @app.command("analyze-portfolio")

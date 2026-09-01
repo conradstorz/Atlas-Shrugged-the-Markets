@@ -5,6 +5,7 @@ import sqlite3
 from pathlib import Path
 
 from atlas.parsing import normalize_asset_type, parse_money
+from atlas.providers.holdings_file import HoldingsFileProvider
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
@@ -65,18 +66,33 @@ def load_seed_universe(conn: sqlite3.Connection, seed_path: Path) -> int:
                     row.get("Source", "Uploaded ETF Select List"),
                 ),
             )
-            conn.execute("DELETE FROM etf_holding WHERE etf_symbol = ? AND source = 'seed_top_ten'", (symbol,))
-            for rank, holding_symbol in enumerate(_split_seed_holdings(top_ten), start=1):
+            # Real imported holdings (source='holdings_file') always outrank the
+            # seed top-ten list. Without this check, the DELETE+INSERT below —
+            # which runs on every `generate-report` and `atlas serve` startup —
+            # would silently flip an imported row back to seed_top_ten (with a
+            # now-stale weight attached), destroying real data. If the fund has
+            # any holdings_file rows, skip touching its holdings entirely; the
+            # only way to replace imported holdings is to re-import them.
+            has_holdings_file_rows = (
                 conn.execute(
-                    """
-                    INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, source)
-                    VALUES (?, ?, ?, 'seed_top_ten')
-                    ON CONFLICT(etf_symbol, holding_symbol) DO UPDATE SET
-                        rank=excluded.rank,
-                        source=excluded.source
-                    """,
-                    (symbol, holding_symbol, rank),
-                )
+                    "SELECT 1 FROM etf_holding WHERE etf_symbol = ? AND source = 'holdings_file' LIMIT 1",
+                    (symbol,),
+                ).fetchone()
+                is not None
+            )
+            if not has_holdings_file_rows:
+                conn.execute("DELETE FROM etf_holding WHERE etf_symbol = ? AND source = 'seed_top_ten'", (symbol,))
+                for rank, holding_symbol in enumerate(_split_seed_holdings(top_ten), start=1):
+                    conn.execute(
+                        """
+                        INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, source)
+                        VALUES (?, ?, ?, 'seed_top_ten')
+                        ON CONFLICT(etf_symbol, holding_symbol) DO UPDATE SET
+                            rank=excluded.rank,
+                            source=excluded.source
+                        """,
+                        (symbol, holding_symbol, rank),
+                    )
             count += 1
     conn.commit()
     return count
@@ -122,3 +138,39 @@ def load_portfolio_csv(conn: sqlite3.Connection, portfolio_name: str, portfolio_
             count += 1
     conn.commit()
     return count
+
+
+def load_fund_holdings(conn: sqlite3.Connection, etf_symbol: str, path: Path) -> int:
+    """Import an issuer holdings-with-weights CSV, replacing prior holdings for the fund.
+
+    Parses ``path`` with :class:`~atlas.providers.holdings_file.HoldingsFileProvider`,
+    deletes all existing ``etf_holding`` rows for the fund (both sources), then
+    inserts the parsed rows tagged ``source='holdings_file'`` with ``rank``
+    assigned 1..N by descending weight. Re-import fully replaces rather than
+    accumulating. Imported holdings always outrank the seed top-ten list (see
+    ``load_seed_universe``).
+
+    Inserts a minimal ``etf`` row for the symbol (description ``''``) if one
+    does not already exist, since ``etf_holding`` has a foreign key to
+    ``etf(symbol)`` and holdings may be imported for a fund outside the seed
+    universe. Returns the number of holdings stored.
+    """
+    symbol = etf_symbol.strip().upper()
+    holdings = sorted(HoldingsFileProvider(path).iter_holdings(), key=lambda h: h.weight, reverse=True)
+
+    conn.execute(
+        "INSERT INTO etf (symbol, description) VALUES (?, ?) ON CONFLICT(symbol) DO NOTHING",
+        (symbol, ""),
+    )
+    conn.execute("DELETE FROM etf_holding WHERE etf_symbol = ?", (symbol,))
+    for rank, holding in enumerate(holdings, start=1):
+        conn.execute(
+            """
+            INSERT INTO etf_holding (
+                etf_symbol, holding_symbol, holding_name, rank, weight, source
+            ) VALUES (?, ?, ?, ?, ?, 'holdings_file')
+            """,
+            (symbol, holding.holding_symbol, holding.holding_name, rank, holding.weight),
+        )
+    conn.commit()
+    return len(holdings)
