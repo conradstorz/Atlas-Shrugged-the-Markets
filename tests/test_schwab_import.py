@@ -60,12 +60,14 @@ def test_multi_account_sums_recurring_symbols(tmp_path: Path) -> None:
 
 def test_schwab_import_feeds_combined_concentration(tmp_path: Path) -> None:
     conn = connect(tmp_path / "atlas.db")
-    # Give SCHD parsed holdings so it is looked through; FSELX has none.
+    # Give SCHD real weighted holdings (KO 30%, PEP 20%; 50% of the fund
+    # modeled) so it is partially looked through; FSELX has none at all.
     conn.execute("INSERT INTO etf (symbol, description) VALUES ('SCHD', 'Schwab Dividend')")
-    for rank, holding in enumerate(["KO", "PEP"], start=1):
+    for rank, (holding, weight) in enumerate([("KO", 30.0), ("PEP", 20.0)], start=1):
         conn.execute(
-            "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank) VALUES ('SCHD', ?, ?)",
-            (holding, rank),
+            "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, weight, source) "
+            "VALUES ('SCHD', ?, ?, ?, 'holdings_file')",
+            (holding, rank, weight),
         )
     conn.commit()
 
@@ -75,7 +77,9 @@ def test_schwab_import_feeds_combined_concentration(tmp_path: Path) -> None:
 
     assert by_symbol["GILD"].direct_value == 16977.50
     assert by_symbol["NVDA"].direct_value == 10410.12
-    # SCHD $2,942.94 split equally across KO/PEP -> 1471.47 each
-    assert by_symbol["KO"].lookthrough_value == 1471.47
-    # FSELX $8,184.69 has no holdings -> unmodeled
-    assert report.unmodeled_fund_value == 8184.69
+    # SCHD $2,942.94: KO gets 30% = 882.88, PEP gets 20% = 588.59.
+    assert by_symbol["KO"].lookthrough_value == 882.88
+    assert by_symbol["PEP"].lookthrough_value == 588.59
+    # FSELX $8,184.69 has no holdings at all -> fully unmodeled.
+    # SCHD's remaining 50% ($1,471.47) is also unmodeled, not estimated.
+    assert report.unmodeled_fund_value == 9656.16

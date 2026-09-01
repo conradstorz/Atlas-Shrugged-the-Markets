@@ -1,13 +1,9 @@
-"""Tests for portfolio.analysis hidden-concentration math.
+"""Tests for portfolio.analysis: the weighted look-through concentration engine.
 
-Uses a controlled two-ETF universe so the equal-weight estimate can be
-computed by hand:
-
-    AAA holds {X, Y}  (2 holdings)
-    BBB holds {X, Z}  (2 holdings)
-
-For a portfolio of AAA and BBB, each holding of an ETF receives
-(position_weight / holding_count) of the portfolio.
+`combined_concentration` reports exact math where Atlas has real weighted
+fund holdings (`etf_holding.source = 'holdings_file'`) and reports "not
+modeled" everywhere else. It never estimates by spreading a fund's value
+equally across an unweighted top-ten list.
 """
 
 import sqlite3
@@ -18,26 +14,10 @@ import pytest
 from atlas.db.database import connect
 from atlas.portfolio.analysis import (
     ConcentrationReport,
+    FundCoverage,
     combined_concentration,
-    portfolio_hidden_concentration,
     summarize_portfolio,
 )
-
-
-def _seed_universe(conn: sqlite3.Connection) -> None:
-    for symbol in ("AAA", "BBB"):
-        conn.execute(
-            "INSERT INTO etf (symbol, description) VALUES (?, ?)",
-            (symbol, f"{symbol} test fund"),
-        )
-    holdings = {"AAA": ["X", "Y"], "BBB": ["X", "Z"]}
-    for etf_symbol, symbols in holdings.items():
-        for rank, holding in enumerate(symbols, start=1):
-            conn.execute(
-                "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank) VALUES (?, ?, ?)",
-                (etf_symbol, holding, rank),
-            )
-    conn.commit()
 
 
 def _add_portfolio(conn: sqlite3.Connection, name: str, positions: list[tuple]) -> None:
@@ -55,85 +35,61 @@ def _add_portfolio(conn: sqlite3.Connection, name: str, positions: list[tuple]) 
     conn.commit()
 
 
-def _percent_by_holding(rows) -> dict[str, float]:
-    return {row["holding_symbol"]: row["estimated_portfolio_percent"] for row in rows}
+def _add_weighted_holdings(conn: sqlite3.Connection, etf_symbol: str, holdings: list[tuple]) -> None:
+    """holdings: list of (holding_symbol, weight_percent). Inserted as source='holdings_file'."""
+    conn.execute(
+        "INSERT INTO etf (symbol, description) VALUES (?, ?) ON CONFLICT(symbol) DO NOTHING",
+        (etf_symbol, f"{etf_symbol} test fund"),
+    )
+    for rank, (holding_symbol, weight) in enumerate(holdings, start=1):
+        conn.execute(
+            "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, weight, source) "
+            "VALUES (?, ?, ?, ?, 'holdings_file')",
+            (etf_symbol, holding_symbol, rank, weight),
+        )
+    conn.commit()
 
 
-def test_equal_weight_concentration_math(tmp_path: Path) -> None:
-    conn = connect(tmp_path / "atlas.db")
-    _seed_universe(conn)
-    # total 100000: AAA weight 0.6, BBB weight 0.4
-    _add_portfolio(conn, "P", [("AAA", 60000, "ETF"), ("BBB", 40000, "ETF")])
-
-    rows = portfolio_hidden_concentration(conn, "P")
-    percents = _percent_by_holding(rows)
-
-    # X = 0.6/2 + 0.4/2 = 0.5 ; Y = 0.6/2 = 0.3 ; Z = 0.4/2 = 0.2
-    assert percents == {"X": 50.0, "Y": 30.0, "Z": 20.0}
-
-
-def test_concentration_is_sorted_by_percent_desc(tmp_path: Path) -> None:
-    conn = connect(tmp_path / "atlas.db")
-    _seed_universe(conn)
-    _add_portfolio(conn, "P", [("AAA", 60000, "ETF"), ("BBB", 40000, "ETF")])
-
-    rows = portfolio_hidden_concentration(conn, "P")
-
-    assert [row["holding_symbol"] for row in rows] == ["X", "Y", "Z"]
+def _add_seed_holdings(conn: sqlite3.Connection, etf_symbol: str, holding_symbols: list[str]) -> None:
+    """Seed top-ten membership rows: no weight, source='seed_top_ten'."""
+    conn.execute(
+        "INSERT INTO etf (symbol, description) VALUES (?, ?) ON CONFLICT(symbol) DO NOTHING",
+        (etf_symbol, f"{etf_symbol} test fund"),
+    )
+    for rank, holding_symbol in enumerate(holding_symbols, start=1):
+        conn.execute(
+            "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, source) "
+            "VALUES (?, ?, ?, 'seed_top_ten')",
+            (etf_symbol, holding_symbol, rank),
+        )
+    conn.commit()
 
 
-def test_concentration_counts_source_positions(tmp_path: Path) -> None:
-    conn = connect(tmp_path / "atlas.db")
-    _seed_universe(conn)
-    _add_portfolio(conn, "P", [("AAA", 60000, "ETF"), ("BBB", 40000, "ETF")])
+def _build_worked_example(conn: sqlite3.Connection) -> None:
+    """The brief's worked example: NVDA direct, SCHB weighted, SCHD seed-only, CASH.
 
-    rows = portfolio_hidden_concentration(conn, "P")
-    by_holding = {row["holding_symbol"]: row for row in rows}
-
-    # X is reachable via both AAA and BBB; Y only via AAA.
-    assert by_holding["X"]["appears_in_positions"] == 2
-    assert set(by_holding["X"]["source_etfs"].split(",")) == {"AAA", "BBB"}
-    assert by_holding["Y"]["appears_in_positions"] == 1
-
-
-def test_non_etf_positions_dilute_the_denominator(tmp_path: Path) -> None:
-    conn = connect(tmp_path / "atlas.db")
-    _seed_universe(conn)
-    # CASH has no parsed holdings, but its value is still part of the total.
+    Total portfolio value $100,000.
+    """
+    _add_weighted_holdings(
+        conn,
+        "SCHB",
+        [("NVDA", 7.00), ("AAPL", 6.00), ("MSFT", 5.00)],
+    )
+    _add_seed_holdings(conn, "SCHD", ["XOM"])
     _add_portfolio(
         conn,
         "P",
-        [("AAA", 60000, "ETF"), ("BBB", 40000, "ETF"), ("CASH", 100000, "Cash")],
+        [
+            ("NVDA", 10000, "equity"),
+            ("SCHB", 50000, "etf"),
+            ("SCHD", 25000, "etf"),
+            ("CASH", 15000, "cash"),
+        ],
     )
-
-    rows = portfolio_hidden_concentration(conn, "P")
-    percents = _percent_by_holding(rows)
-
-    # total is now 200000: X = 0.3/2 + 0.2/2 = 0.25 -> 25%
-    assert percents == {"X": 25.0, "Y": 15.0, "Z": 10.0}
-
-
-def test_zero_total_value_returns_empty_without_dividing_by_zero(tmp_path: Path) -> None:
-    conn = connect(tmp_path / "atlas.db")
-    _seed_universe(conn)
-    _add_portfolio(conn, "P", [("AAA", 0, "ETF"), ("BBB", 0, "ETF")])
-
-    rows = portfolio_hidden_concentration(conn, "P")
-
-    assert rows == []
-
-
-def test_missing_portfolio_raises_value_error(tmp_path: Path) -> None:
-    conn = connect(tmp_path / "atlas.db")
-    _seed_universe(conn)
-
-    with pytest.raises(ValueError):
-        portfolio_hidden_concentration(conn, "does-not-exist")
 
 
 def test_summarize_splits_equity_fund_and_cash_value(tmp_path: Path) -> None:
     conn = connect(tmp_path / "atlas.db")
-    _seed_universe(conn)
     _add_portfolio(
         conn,
         "P",
@@ -149,49 +105,132 @@ def test_summarize_splits_equity_fund_and_cash_value(tmp_path: Path) -> None:
     assert summary.cash_value == 100000
 
 
-def test_combined_concentration_sums_direct_and_lookthrough(tmp_path: Path) -> None:
+def test_combined_concentration_worked_example(tmp_path: Path) -> None:
+    """The brief's primary worked example, matched to the hand-computed figures."""
     conn = connect(tmp_path / "atlas.db")
-    # FUND holds {NVDA, AAPL}; portfolio holds NVDA directly and FUND.
-    conn.execute("INSERT INTO etf (symbol, description) VALUES ('FUND', 'A fund')")
-    for rank, h in enumerate(["NVDA", "AAPL"], start=1):
-        conn.execute(
-            "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank) VALUES ('FUND', ?, ?)",
-            (h, rank),
-        )
-    conn.commit()
-    _add_portfolio(conn, "P", [("NVDA", 100, "equity"), ("FUND", 100, "etf")])
+    _build_worked_example(conn)
 
     report = combined_concentration(conn, "P")
     by_symbol = {line.symbol: line for line in report.lines}
 
-    assert report.total_value == 200
-    # NVDA: 100 direct + 100/2 look-through = 150 -> 75%
-    assert by_symbol["NVDA"].exposure_value == 150.0
-    assert by_symbol["NVDA"].exposure_percent == 75.0
-    assert by_symbol["NVDA"].direct_value == 100.0
-    assert by_symbol["NVDA"].lookthrough_value == 50.0
-    assert by_symbol["NVDA"].source_funds == ["FUND"]
-    # AAPL: 50 look-through only -> 25%
-    assert by_symbol["AAPL"].exposure_value == 50.0
-    assert by_symbol["AAPL"].direct_value == 0.0
-    assert report.unmodeled_fund_value == 0.0
+    # NVDA is held both directly and inside SCHB's weighted look-through, and
+    # must be summed into a single line.
+    assert by_symbol["NVDA"].exposure_value == 13500.00
+    assert by_symbol["NVDA"].direct_value == 10000.00
+    assert by_symbol["NVDA"].lookthrough_value == 3500.00
+    assert by_symbol["NVDA"].exposure_percent == 13.50
+    assert by_symbol["NVDA"].source_funds == ["SCHB"]
+
+    assert by_symbol["AAPL"].exposure_value == 3000.00
+    assert by_symbol["AAPL"].direct_value == 0.00
+    assert by_symbol["AAPL"].lookthrough_value == 3000.00
+    assert by_symbol["AAPL"].exposure_percent == 3.00
+
+    assert by_symbol["MSFT"].exposure_value == 2500.00
+    assert by_symbol["MSFT"].direct_value == 0.00
+    assert by_symbol["MSFT"].lookthrough_value == 2500.00
+    assert by_symbol["MSFT"].exposure_percent == 2.50
+
+    # SCHD is seed-only (no weights): it contributes nothing to lines.
+    assert "XOM" not in by_symbol
+    assert "SCHD" not in by_symbol
+
+    assert report.total_value == 100000.00
+    assert report.modeled_value == 19000.00
+    assert report.unmodeled_fund_value == 66000.00
+    assert report.cash_value == 15000.00
+    assert report.other_value == 0.00
+
+    assert report.total_value == pytest.approx(
+        report.modeled_value + report.unmodeled_fund_value + report.cash_value + report.other_value
+    )
+
+    coverage_by_symbol = {fc.symbol: fc for fc in report.fund_coverage}
+    assert [fc.symbol for fc in report.fund_coverage] == ["SCHB", "SCHD"]  # sorted by market_value desc
+
+    schb = coverage_by_symbol["SCHB"]
+    assert schb.market_value == 50000.00
+    assert schb.has_weights is True
+    assert schb.modeled_share == pytest.approx(0.18)
+    assert schb.modeled_value == 9000.00
+
+    schd = coverage_by_symbol["SCHD"]
+    assert schd.market_value == 25000.00
+    assert schd.has_weights is False
+    assert schd.modeled_share == 0.0
+    assert schd.modeled_value == 0.0
+
+    # Lines sorted by exposure_percent desc, symbol asc tiebreak.
+    assert [line.symbol for line in report.lines] == ["NVDA", "AAPL", "MSFT"]
 
 
-def test_combined_concentration_reports_unmodeled_fund_value(tmp_path: Path) -> None:
+def test_seed_only_fund_reports_nothing_but_unmodeled_value(tmp_path: Path) -> None:
     conn = connect(tmp_path / "atlas.db")
-    # FUND has no parsed holdings -> cannot be looked through.
+    _add_seed_holdings(conn, "SCHD", ["XOM", "JNJ"])
+    _add_portfolio(conn, "P", [("SCHD", 25000, "etf")])
+
+    report = combined_concentration(conn, "P")
+
+    assert report.lines == []
+    assert report.unmodeled_fund_value == 25000.00
+    assert report.modeled_value == 0.00
+
+
+def test_fund_with_no_holdings_at_all_is_fully_unmodeled(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "atlas.db")
     _add_portfolio(conn, "P", [("NVDA", 100, "equity"), ("FUND", 100, "etf")])
 
     report = combined_concentration(conn, "P")
     by_symbol = {line.symbol: line for line in report.lines}
 
     assert by_symbol["NVDA"].exposure_value == 100.0
-    assert by_symbol["NVDA"].exposure_percent == 50.0
     assert "FUND" not in by_symbol
     assert report.unmodeled_fund_value == 100.0
+    assert report.modeled_value == 100.0
+
+    coverage_by_symbol = {fc.symbol: fc for fc in report.fund_coverage}
+    assert coverage_by_symbol["FUND"].has_weights is False
+    assert coverage_by_symbol["FUND"].modeled_share == 0.0
+    assert coverage_by_symbol["FUND"].modeled_value == 0.0
 
 
-def test_combined_concentration_sorted_desc(tmp_path: Path) -> None:
+def test_other_asset_type_reported_separately_and_invariant_holds(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "atlas.db")
+    _add_portfolio(
+        conn,
+        "P",
+        [
+            ("NVDA", 10000, "equity"),
+            ("BOND-FUND", 5000, "other"),
+            ("CASH", 5000, "cash"),
+        ],
+    )
+
+    report = combined_concentration(conn, "P")
+
+    assert report.other_value == 5000.00
+    assert report.total_value == pytest.approx(
+        report.modeled_value + report.unmodeled_fund_value + report.cash_value + report.other_value
+    )
+
+
+def test_fund_near_full_weight_coverage_leaves_near_zero_unmodeled(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "atlas.db")
+    _add_weighted_holdings(
+        conn,
+        "TOTAL",
+        [("A", 40.00), ("B", 35.00), ("C", 24.99)],  # sums to 99.99%
+    )
+    _add_portfolio(conn, "P", [("TOTAL", 10000, "etf")])
+
+    report = combined_concentration(conn, "P")
+
+    coverage = {fc.symbol: fc for fc in report.fund_coverage}["TOTAL"]
+    assert coverage.modeled_share == pytest.approx(0.9999)
+    assert report.unmodeled_fund_value == pytest.approx(1.0, abs=0.01)
+
+
+def test_lines_sorted_by_exposure_percent_desc_symbol_tiebreak(tmp_path: Path) -> None:
     conn = connect(tmp_path / "atlas.db")
     _add_portfolio(conn, "P", [("NVDA", 100, "equity"), ("AAPL", 300, "equity")])
 
@@ -203,6 +242,21 @@ def test_combined_concentration_sorted_desc(tmp_path: Path) -> None:
 def test_combined_concentration_zero_total_is_empty(tmp_path: Path) -> None:
     conn = connect(tmp_path / "atlas.db")
     _add_portfolio(conn, "P", [("NVDA", 0, "equity")])
+
+    report = combined_concentration(conn, "P")
+
+    assert report.lines == []
+    assert report.total_value == 0.0
+    assert report.modeled_value == 0.0
+    assert report.unmodeled_fund_value == 0.0
+    assert report.cash_value == 0.0
+    assert report.other_value == 0.0
+    assert report.fund_coverage == []
+
+
+def test_combined_concentration_negative_total_is_empty(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "atlas.db")
+    _add_portfolio(conn, "P", [("NVDA", -100, "equity")])
 
     report = combined_concentration(conn, "P")
 
