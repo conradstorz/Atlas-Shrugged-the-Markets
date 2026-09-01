@@ -256,6 +256,18 @@ def analyze_portfolio(
             ", ".join(line.source_funds) or "-",
         )
     console.print(table)
+    if len(report.lines) == limit:
+        # `combined_concentration` always trims to `limit` rows, so this is the
+        # best truncation signal available without summing across the two
+        # figures ourselves (the exact bug this caveat exists to prevent).
+        # A fund universe that lands on precisely `limit` modeled names would
+        # print this caveat unnecessarily, but that false positive is far
+        # cheaper than a reader mistaking a partial table for the whole one.
+        console.print(
+            f"\n[dim]Showing the top {limit} names by exposure; this table is "
+            "not the full modeled set. Use --limit to see more, or see the "
+            "Modeled line above for the total.[/dim]"
+        )
     console.print(
         "\nNote: direct holdings and weighted fund look-through (imported via "
         "`atlas import-holdings`) are exact. Fund value without an imported "
