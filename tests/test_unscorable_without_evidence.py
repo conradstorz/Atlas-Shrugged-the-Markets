@@ -165,7 +165,11 @@ def test_the_unscored_explanation_says_so_and_names_the_missing_data(tmp_path: P
     explanation = _scored(conn)["BLANK"].explanation
 
     assert explanation.startswith("Not scored:")
-    assert "no expense ratio, information-technology exposure, or imported holdings file" in explanation
+    assert "no expense ratio" in explanation
+    assert "no information-technology exposure" in explanation
+    # Stated as the unmet condition, not as an assertion that nothing was
+    # imported: a partial file also leaves diversification unmeasured.
+    assert "no holdings file covering at least 90% of the fund" in explanation
     assert "Role=Foundation and AI=8/10 are keyword heuristics only" in explanation
     # It must also say what would produce a score.
     assert "atlas import-holdings" in explanation

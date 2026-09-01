@@ -280,11 +280,11 @@ def _explain(
     """
     if overall is None:
         return (
-            "Not scored: no expense ratio, information-technology exposure, or "
-            f"imported holdings file. Role={role} and AI={ai_score}/10 are keyword "
-            "heuristics only. A gross expense ratio, an information-technology "
-            "exposure figure, or a holdings file covering the whole fund "
-            "(atlas import-holdings) would each produce a score."
+            "Not scored: no expense ratio, no information-technology exposure, and "
+            f"no holdings file covering at least {FULL_COVERAGE_THRESHOLD:g}% of the "
+            f"fund. Role={role} and AI={ai_score}/10 are keyword heuristics only. "
+            "A gross expense ratio, an information-technology exposure figure, or a "
+            "full holdings file (atlas import-holdings) would each produce a score."
         )
 
     if resilience_score is None:
@@ -305,9 +305,15 @@ def _explain(
         )
 
     if diversification is None:
+        # True whether no file was imported at all or an imported one covers too
+        # little of the fund: the clause states the condition that is unmet, not
+        # an assumption about what the investor did. Telling someone who
+        # imported a partial file that they imported nothing would send them to
+        # re-run a command they already ran.
         diversification_clause = (
-            "diversification not scored (no full holdings file imported; run "
-            "atlas import-holdings), so the remaining components share "
+            "diversification not scored (no holdings file covering at least "
+            f"{FULL_COVERAGE_THRESHOLD:g}% of the fund; run atlas import-holdings "
+            "with a full issuer holdings file), so the remaining components share "
             "the same score budget"
         )
     else:

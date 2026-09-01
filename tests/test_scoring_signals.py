@@ -333,3 +333,38 @@ def test_itot_and_vti_without_any_evidence_are_both_unscored(tmp_path: Path) -> 
             itot.diversification_score) == (
         vti.overall_score, vti.cost_score, vti.resilience_score, vti.diversification_score
     )
+
+
+def _import_partial_holdings(conn: sqlite3.Connection, symbol: str) -> None:
+    """Give `symbol` an imported file whose weights cover far too little."""
+    conn.execute(
+        "INSERT INTO etf (symbol, description) VALUES (?, ?) ON CONFLICT(symbol) DO NOTHING",
+        (symbol, f"{symbol} test fund"),
+    )
+    for rank, (holding, weight) in enumerate([("AAA", 20.0), ("BBB", 15.0)], start=1):
+        conn.execute(
+            "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, weight, source) "
+            "VALUES (?, ?, ?, ?, 'holdings_file')",
+            (symbol, holding, rank, weight),
+        )
+    conn.commit()
+
+
+def test_explanation_does_not_tell_a_partial_importer_they_imported_nothing(tmp_path: Path) -> None:
+    """The unmeasured-diversification clause must describe the unmet condition.
+
+    `measured_diversification` returns None both when no holdings file exists
+    and when an imported one covers too little of the fund. Saying "no holdings
+    file imported" would send someone who imported a partial file to re-run a
+    command they already ran.
+    """
+    conn = connect(tmp_path / "atlas.db")
+    _import_partial_holdings(conn, "PARTIAL")  # 35% coverage, below the threshold
+
+    explanation = next(s for s in score_all(conn) if s.symbol == "PARTIAL").explanation
+
+    assert measured_diversification(conn, "PARTIAL") is None
+    assert f"{FULL_COVERAGE_THRESHOLD:g}%" in explanation
+    # It must not assert that nothing was imported, because something was.
+    assert "no full holdings file imported" not in explanation
+    assert "no imported holdings file" not in explanation
