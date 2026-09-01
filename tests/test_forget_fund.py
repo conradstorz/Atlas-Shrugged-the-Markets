@@ -21,7 +21,7 @@ import pytest
 from typer.testing import CliRunner
 
 from atlas.cli.main import app as cli_app
-from atlas.db.database import connect, forget_fund, load_fund_holdings, load_seed_universe
+from atlas.db.database import connect, forget_fund, load_fund_holdings
 from atlas.exceptions import AtlasDataError
 from atlas.scoring.engine import score_all
 
@@ -190,3 +190,39 @@ def test_round_trip_phantom_import_and_forget_restores_universe_count(tmp_path: 
     conn = connect(db_path)
     after_forget = conn.execute("SELECT COUNT(*) AS c FROM etf").fetchone()["c"]
     assert after_forget == baseline
+
+
+def test_the_warning_repeats_on_every_import_for_a_phantom_fund(tmp_path: Path) -> None:
+    """A phantom must not go quiet after its first import.
+
+    `load_fund_holdings` creates a bare `etf` row for an unknown symbol, so a
+    check for mere existence would warn once and then stay silent, letting the
+    phantom fade into the universe. Seed-derived rows carry a `source`; a
+    phantom's is NULL.
+    """
+    holdings = tmp_path / "h.csv"
+    holdings.write_text("Ticker,Name,Weight\nAAA,Alpha,60.0\nBBB,Beta,35.0\n", encoding="utf-8")
+    db = tmp_path / "atlas.db"
+
+    for attempt in ("first", "second"):
+        result = runner.invoke(cli_app, ["import-holdings", "SHCB", str(holdings), "--db", str(db)])
+        assert result.exit_code == 0, attempt
+        assert "not in the seed universe" in result.output, f"no warning on the {attempt} import"
+
+
+def test_a_seed_fund_never_warns(tmp_path: Path) -> None:
+    """A symbol that came from the seed universe is not a phantom."""
+    db = tmp_path / "atlas.db"
+    conn = connect(db)
+    conn.execute(
+        "INSERT INTO etf (symbol, description, source) VALUES ('SCHB', 'Schwab', 'Uploaded ETF Select List')"
+    )
+    conn.commit()
+    conn.close()
+    holdings = tmp_path / "h.csv"
+    holdings.write_text("Ticker,Name,Weight\nAAA,Alpha,60.0\nBBB,Beta,35.0\n", encoding="utf-8")
+
+    result = runner.invoke(cli_app, ["import-holdings", "SCHB", str(holdings), "--db", str(db)])
+
+    assert result.exit_code == 0
+    assert "not in the seed universe" not in result.output

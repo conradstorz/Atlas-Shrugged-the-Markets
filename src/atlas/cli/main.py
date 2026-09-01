@@ -195,8 +195,15 @@ def import_holdings(
     # Checked before `load_fund_holdings` runs, which is what would insert the
     # minimal `etf` row for an unfamiliar symbol — after that call this lookup
     # would always find one and the warning could never fire.
-    already_in_universe = conn.execute("SELECT 1 FROM etf WHERE symbol = ?", (symbol,)).fetchone()
-    if already_in_universe is None:
+    # Test for a *seed-derived* row, not merely any row. `load_fund_holdings`
+    # creates a bare `etf` row (source NULL) for an unknown symbol, so checking
+    # for existence alone would warn on the first typo'd import and stay silent
+    # on every one after it — leaving the phantom to fade quietly into the
+    # universe, which is the failure this warning exists to prevent.
+    seed_derived = conn.execute(
+        "SELECT 1 FROM etf WHERE symbol = ? AND source IS NOT NULL", (symbol,)
+    ).fetchone()
+    if seed_derived is None:
         console.print(
             f"[yellow]Warning: {symbol} is not in the seed universe.\n"
             "  Importing anyway and creating the fund.\n"
