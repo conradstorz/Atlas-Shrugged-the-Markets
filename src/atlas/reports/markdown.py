@@ -66,38 +66,81 @@ def build_research_report(conn: sqlite3.Connection, portfolio_name: str | None =
             f"- Fund value (ETF + mutual): {_money(summary.fund_value)}",
             f"- Cash value: {_money(summary.cash_value)}",
             "",
+            "### Coverage",
+            "",
+            "The number that governs whether the table below can be trusted: how "
+            "much of this portfolio's dollars are actually modeled.",
+            "",
+        ])
+        report_data = combined_concentration(conn, portfolio_name, limit=25)
+        modeled_percent = (
+            round(report_data.modeled_value / report_data.total_value * 100, 2)
+            if report_data.total_value
+            else 0.0
+        )
+        lines.extend([
+            f"Modeled: {_money(report_data.modeled_value)} of "
+            f"{_money(report_data.total_value)} ({modeled_percent:.2f}%).",
+            "",
+            "| Component | Value |",
+            "|---|---:|",
+            f"| Modeled (direct + weighted look-through) | {_money(report_data.modeled_value)} |",
+            f"| Unmodeled fund value | {_money(report_data.unmodeled_fund_value)} |",
+            f"| Cash | {_money(report_data.cash_value)} |",
+            f"| Other | {_money(report_data.other_value)} |",
+            f"| Total | {_money(report_data.total_value)} |",
+            "",
+            "#### Per-Fund Coverage",
+            "",
+            "Funds without real weights (Has Weights: No) are the actionable list — "
+            "run `atlas import-holdings SYMBOL FILE` for each to raise coverage.",
+            "",
+            "| Fund | Market Value | Has Weights | Modeled Share | Modeled Value |",
+            "|---|---:|---|---:|---:|",
+        ])
+        for fc in report_data.fund_coverage:
+            lines.append(
+                f"| {fc.symbol} | {_money(fc.market_value)} | {'Yes' if fc.has_weights else 'No'} | "
+                f"{fc.modeled_share * 100:.2f}% | {_money(fc.modeled_value)} |"
+            )
+        lines.extend([
+            "",
             "### Combined Concentration",
             "",
-            "Per-name exposure combining directly-held positions with equal-weight "
-            "ETF/fund look-through. Direct dollars are exact; look-through is a "
-            "prototype estimate from parsed top-ten holdings.",
+            "Per-name exposure combining directly-held positions with weighted "
+            "ETF/fund look-through. Both direct dollars and weighted look-through "
+            "are exact math, not estimates. Fund value without an imported "
+            "holdings file is excluded from this table rather than estimated — "
+            "see Coverage above for how much that is. The table below shows the "
+            f"top {len(report_data.lines)} names by exposure; it is not the "
+            "full modeled set (see the Coverage dollar totals above for that).",
             "",
             "| Symbol | Exposure % | Exposure | Direct | Look-through | Source Funds |",
             "|---|---:|---:|---:|---:|---|",
         ])
-        report_data = combined_concentration(conn, portfolio_name, limit=25)
         for line in report_data.lines:
             lines.append(
                 f"| {line.symbol} | {line.exposure_percent:.2f}% | {_money(line.exposure_value)} | "
                 f"{_money(line.direct_value)} | {_money(line.lookthrough_value)} | "
                 f"{', '.join(line.source_funds) or '-'} |"
             )
-        lines.append("")
-        lines.append(f"Fund value not looked through: {_money(report_data.unmodeled_fund_value)}.")
 
     lines.extend([
         "",
         "## Current Limitations",
         "",
-        "- Full holdings are not yet imported.",
-        "- Top-ten holdings do not include actual holding weights in the seed file.",
+        "- Holdings weights are used for look-through only where a fund's holdings file "
+        "has been imported (`atlas import-holdings`); a fund without one is excluded "
+        "from look-through entirely, not estimated.",
+        "- The seed universe's top-ten select-list carries fund membership only, with "
+        "no weights — it is never enough on its own to model a fund.",
         "- Valuation, dividend growth, historical volatility, and drawdown data are not yet connected.",
         "- Scores are explainable but still early heuristics.",
         "",
         "## Next Model Improvements",
         "",
-        "1. Add full holdings ingestion.",
-        "2. Add weighted overlap math.",
+        "1. Import holdings files for the rest of the ETF universe to raise weighted coverage.",
+        "2. Add weighted overlap math to `compare-overlap` (it still compares top-ten membership only).",
         "3. Add score profiles so different investment philosophies can be compared.",
         "4. Add scenario scoring for AI acceleration, AI disappointment, persistent inflation, and broadening market leadership.",
     ])

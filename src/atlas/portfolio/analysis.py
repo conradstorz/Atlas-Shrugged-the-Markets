@@ -90,6 +90,74 @@ def _empty_report() -> ConcentrationReport:
     )
 
 
+@dataclass(frozen=True)
+class UniverseCoverage:
+    """How much of the entire ``etf`` universe Atlas can see through.
+
+    Every fund in ``etf`` falls into exactly one of three buckets, so the
+    three subcategories always sum to ``total_funds``:
+
+    - ``weighted_funds``: has at least one ``etf_holding`` row with
+      ``source = 'holdings_file'`` (real weights, from ``atlas import-holdings``).
+    - ``membership_only_funds``: has ``etf_holding`` rows, but none of them
+      are weighted — a seed top-ten membership list only.
+    - ``no_holdings_funds``: has no ``etf_holding`` rows at all.
+    """
+
+    total_funds: int
+    weighted_funds: int
+    membership_only_funds: int
+    no_holdings_funds: int
+
+
+def universe_coverage(conn: sqlite3.Connection) -> UniverseCoverage:
+    """Partition every fund in the ``etf`` table by how much Atlas can model it.
+
+    This is a universe-wide count, independent of any portfolio: it answers
+    "how much of what Atlas knows about is actually weighted" rather than
+    "how much of my money is modeled" (that is ``fund_coverage`` on a
+    ``ConcentrationReport``).
+    """
+    total_funds = int(conn.execute("SELECT COUNT(*) AS c FROM etf").fetchone()["c"])
+    weighted_funds = int(
+        conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM etf e
+            WHERE EXISTS (
+                SELECT 1 FROM etf_holding h
+                WHERE h.etf_symbol = e.symbol AND h.source = 'holdings_file'
+            )
+            """
+        ).fetchone()["c"]
+    )
+    membership_only_funds = int(
+        conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM etf e
+            WHERE EXISTS (SELECT 1 FROM etf_holding h WHERE h.etf_symbol = e.symbol)
+              AND NOT EXISTS (
+                  SELECT 1 FROM etf_holding h
+                  WHERE h.etf_symbol = e.symbol AND h.source = 'holdings_file'
+              )
+            """
+        ).fetchone()["c"]
+    )
+    no_holdings_funds = int(
+        conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM etf e
+            WHERE NOT EXISTS (SELECT 1 FROM etf_holding h WHERE h.etf_symbol = e.symbol)
+            """
+        ).fetchone()["c"]
+    )
+    return UniverseCoverage(
+        total_funds=total_funds,
+        weighted_funds=weighted_funds,
+        membership_only_funds=membership_only_funds,
+        no_holdings_funds=no_holdings_funds,
+    )
+
+
 def combined_concentration(
     conn: sqlite3.Connection, portfolio_name: str, limit: int = 25
 ) -> ConcentrationReport:

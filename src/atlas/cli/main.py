@@ -10,7 +10,7 @@ from rich.table import Table
 from atlas.analytics.overlap import compare_etfs, top_repeated_holdings
 from atlas.db.database import connect, load_fund_holdings, load_portfolio_csv, load_seed_universe
 from atlas.journal.service import add_journal_entry, list_journal_entries
-from atlas.portfolio.analysis import combined_concentration, summarize_portfolio
+from atlas.portfolio.analysis import combined_concentration, summarize_portfolio, universe_coverage
 from atlas.portfolio.schwab import load_schwab_positions
 from atlas.reports.markdown import write_research_report
 from atlas.scoring.engine import score_all
@@ -156,6 +156,66 @@ def import_holdings(
     console.print(f"Imported {count} holdings for {symbol} ({total_weight:.2f}% of fund by weight).")
 
 
+@app.command("coverage")
+def coverage(
+    name: str | None = typer.Option(None, help="Portfolio name for portfolio-level coverage."),
+    db: Path = typer.Option(Path(".atlas/atlas.db"), help="SQLite database path."),
+) -> None:
+    """Show how much of the ETF universe — and optionally a portfolio — Atlas can model.
+
+    Always prints universe-wide fund coverage. With ``--name``, also prints the
+    modeled share of that portfolio's dollars and a per-fund breakdown; funds
+    lacking real weights are the actionable list, since importing a holdings
+    file for each is how coverage is raised.
+    """
+    conn = connect(db)
+    uc = universe_coverage(conn)
+    console.print(
+        f"Universe: {uc.total_funds} funds — {uc.weighted_funds} with real weights, "
+        f"{uc.membership_only_funds} top-ten membership only, {uc.no_holdings_funds} with no holdings."
+    )
+
+    if name is None:
+        return
+
+    try:
+        report = combined_concentration(conn, name)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+
+    modeled_percent = (report.modeled_value / report.total_value * 100) if report.total_value else 0.0
+    console.print(
+        f"\nPortfolio '{name}': modeled ${report.modeled_value:,.2f} of "
+        f"${report.total_value:,.2f} ({modeled_percent:.2f}%)."
+    )
+    console.print(
+        f"  Unmodeled fund value: ${report.unmodeled_fund_value:,.2f}   "
+        f"Cash: ${report.cash_value:,.2f}   Other: ${report.other_value:,.2f}"
+    )
+
+    table = Table(title=f"Fund Coverage — {name}")
+    table.add_column("Fund")
+    table.add_column("Market Value", justify="right")
+    table.add_column("Has Weights")
+    table.add_column("Modeled Share", justify="right")
+    table.add_column("Modeled Value", justify="right")
+    for fc in report.fund_coverage:
+        has_weights_display = "Yes" if fc.has_weights else "[bold red]No[/bold red]"
+        table.add_row(
+            fc.symbol,
+            f"${fc.market_value:,.2f}",
+            has_weights_display,
+            f"{fc.modeled_share * 100:.2f}%",
+            f"${fc.modeled_value:,.2f}",
+        )
+    console.print(table)
+    if any(not fc.has_weights for fc in report.fund_coverage):
+        console.print(
+            "\nRun `atlas import-holdings SYMBOL FILE` for each fund marked 'No' above to raise coverage."
+        )
+
+
 @app.command("analyze-portfolio")
 def analyze_portfolio(
     name: str = typer.Option("Primary", help="Portfolio name."),
@@ -173,6 +233,12 @@ def analyze_portfolio(
     )
 
     report = combined_concentration(conn, name, limit=limit)
+    modeled_percent = (report.modeled_value / report.total_value * 100) if report.total_value else 0.0
+    console.print(
+        f"\nModeled: ${report.modeled_value:,.2f} of ${report.total_value:,.2f} "
+        f"({modeled_percent:.2f}%). Unmodeled fund value: ${report.unmodeled_fund_value:,.2f}."
+    )
+
     table = Table(title="Combined Concentration (Direct + ETF/Fund Look-Through)")
     table.add_column("Symbol")
     table.add_column("Exposure %", justify="right")
@@ -190,9 +256,11 @@ def analyze_portfolio(
             ", ".join(line.source_funds) or "-",
         )
     console.print(table)
-    console.print(f"\nFund value not looked through: ${report.unmodeled_fund_value:,.2f}")
     console.print(
-        "Note: look-through uses the equal-weight top-ten prototype; direct holdings are exact."
+        "\nNote: direct holdings and weighted fund look-through (imported via "
+        "`atlas import-holdings`) are exact. Fund value without an imported "
+        "holdings file is excluded from this table rather than estimated; run "
+        "`atlas import-holdings SYMBOL FILE` to raise coverage."
     )
 
 

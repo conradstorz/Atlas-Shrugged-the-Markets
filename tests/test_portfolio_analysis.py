@@ -15,8 +15,10 @@ from atlas.db.database import connect
 from atlas.portfolio.analysis import (
     ConcentrationReport,
     FundCoverage,
+    UniverseCoverage,
     combined_concentration,
     summarize_portfolio,
+    universe_coverage,
 )
 
 
@@ -288,3 +290,55 @@ def test_lookthrough_accumulates_across_multiple_funds(tmp_path: Path) -> None:
     assert by_symbol["NVDA"].lookthrough_value == 300.00
     assert by_symbol["NVDA"].direct_value == 0.00
     assert by_symbol["NVDA"].source_funds == ["F1", "F2"]
+
+
+# --- universe_coverage ----------------------------------------------------
+
+
+def test_universe_coverage_partitions_total_funds_exactly(tmp_path: Path) -> None:
+    """One weighted fund, one seed-only fund, one fund with no holdings rows
+    at all: totals must partition exactly, per the brief's requirement."""
+    conn = connect(tmp_path / "atlas.db")
+    _add_weighted_holdings(conn, "WEIGHTED", [("A", 10.0)])
+    _add_seed_holdings(conn, "SEEDONLY", ["B"])
+    conn.execute("INSERT INTO etf (symbol, description) VALUES ('BARE', 'no holdings fund')")
+    conn.commit()
+
+    coverage = universe_coverage(conn)
+
+    assert isinstance(coverage, UniverseCoverage)
+    assert coverage.total_funds == 3
+    assert coverage.weighted_funds == 1
+    assert coverage.membership_only_funds == 1
+    assert coverage.no_holdings_funds == 1
+    assert (
+        coverage.weighted_funds + coverage.membership_only_funds + coverage.no_holdings_funds
+        == coverage.total_funds
+    )
+
+
+def test_universe_coverage_empty_universe(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "atlas.db")
+
+    coverage = universe_coverage(conn)
+
+    assert coverage.total_funds == 0
+    assert coverage.weighted_funds == 0
+    assert coverage.membership_only_funds == 0
+    assert coverage.no_holdings_funds == 0
+
+
+def test_universe_coverage_fund_with_only_holdings_file_rows_is_weighted_not_membership(
+    tmp_path: Path,
+) -> None:
+    """A fund whose only etf_holding rows are source='holdings_file' must not
+    also be double-counted as membership-only."""
+    conn = connect(tmp_path / "atlas.db")
+    _add_weighted_holdings(conn, "WEIGHTED", [("A", 10.0), ("B", 20.0)])
+
+    coverage = universe_coverage(conn)
+
+    assert coverage.total_funds == 1
+    assert coverage.weighted_funds == 1
+    assert coverage.membership_only_funds == 0
+    assert coverage.no_holdings_funds == 0
