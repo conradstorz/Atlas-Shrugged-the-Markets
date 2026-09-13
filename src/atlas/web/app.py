@@ -122,9 +122,9 @@ def _page(title: str, body: str) -> str:
 @app.get("/", response_class=HTMLResponse)
 def dashboard() -> str:
     conn = _conn()
-    etf_count = conn.execute("SELECT COUNT(*) AS count FROM etf").fetchone()["count"]
+    etf_count = conn.execute("SELECT COUNT(*) AS count FROM fund").fetchone()["count"]
     # "Scored" means a fund that actually got an overall score. A row in
-    # `etf_score` is not the same thing now that a fund with nothing
+    # `fund_score` is not the same thing now that a fund with nothing
     # measurable stores its role, its AI heuristic and a NULL score; counting
     # rows would report the whole universe as scored.
     scores = read_scores(conn)
@@ -200,7 +200,7 @@ def etf_detail(symbol: str) -> str:
     conn = _conn()
     symbol = symbol.upper()
     score = next((item for item in read_scores(conn) if item.symbol == symbol), None)
-    row = conn.execute("SELECT * FROM etf WHERE symbol = ?", (symbol,)).fetchone()
+    row = conn.execute("SELECT * FROM fund WHERE symbol = ?", (symbol,)).fetchone()
     if score is None or row is None:
         return _page("ETF Not Found", f"<h2>{escape(symbol)} not found</h2>")
     holdings = top_ten_holdings(conn, symbol)

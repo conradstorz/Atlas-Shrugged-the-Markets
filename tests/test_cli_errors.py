@@ -44,5 +44,5 @@ def test_import_holdings_leaves_no_holdings_behind_after_a_rejected_file(tmp_pat
     from atlas.db.database import connect
 
     conn = connect(db_path)
-    rows = conn.execute("SELECT COUNT(*) AS count FROM etf_holding").fetchone()["count"]
+    rows = conn.execute("SELECT COUNT(*) AS count FROM fund_holding").fetchone()["count"]
     assert rows == 0

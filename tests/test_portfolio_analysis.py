@@ -1,7 +1,7 @@
 """Tests for portfolio.analysis: the weighted look-through concentration engine.
 
 `combined_concentration` reports exact math where Atlas has real weighted
-fund holdings (`etf_holding.source = 'holdings_file'`) and reports "not
+fund holdings (`fund_holding.source = 'holdings_file'`) and reports "not
 modeled" everywhere else. It never estimates by spreading a fund's value
 equally across an unweighted top-ten list.
 """
@@ -18,6 +18,7 @@ from atlas.portfolio.analysis import (
     summarize_portfolio,
     universe_coverage,
 )
+from db_fixtures import add_fund, add_holding
 
 
 def _add_portfolio(conn: sqlite3.Connection, name: str, positions: list[tuple]) -> None:
@@ -35,33 +36,19 @@ def _add_portfolio(conn: sqlite3.Connection, name: str, positions: list[tuple]) 
     conn.commit()
 
 
-def _add_weighted_holdings(conn: sqlite3.Connection, etf_symbol: str, holdings: list[tuple]) -> None:
+def _add_weighted_holdings(conn: sqlite3.Connection, fund_symbol: str, holdings: list[tuple]) -> None:
     """holdings: list of (holding_symbol, weight_percent). Inserted as source='holdings_file'."""
-    conn.execute(
-        "INSERT INTO etf (symbol, description) VALUES (?, ?) ON CONFLICT(symbol) DO NOTHING",
-        (etf_symbol, f"{etf_symbol} test fund"),
-    )
+    add_fund(conn, fund_symbol, f"{fund_symbol} test fund")
     for rank, (holding_symbol, weight) in enumerate(holdings, start=1):
-        conn.execute(
-            "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, weight, source) "
-            "VALUES (?, ?, ?, ?, 'holdings_file')",
-            (etf_symbol, holding_symbol, rank, weight),
-        )
+        add_holding(conn, fund_symbol, holding_symbol, rank=rank, weight=weight, source="holdings_file")
     conn.commit()
 
 
-def _add_seed_holdings(conn: sqlite3.Connection, etf_symbol: str, holding_symbols: list[str]) -> None:
+def _add_seed_holdings(conn: sqlite3.Connection, fund_symbol: str, holding_symbols: list[str]) -> None:
     """Seed top-ten membership rows: no weight, source='seed_top_ten'."""
-    conn.execute(
-        "INSERT INTO etf (symbol, description) VALUES (?, ?) ON CONFLICT(symbol) DO NOTHING",
-        (etf_symbol, f"{etf_symbol} test fund"),
-    )
+    add_fund(conn, fund_symbol, f"{fund_symbol} test fund")
     for rank, holding_symbol in enumerate(holding_symbols, start=1):
-        conn.execute(
-            "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, source) "
-            "VALUES (?, ?, ?, 'seed_top_ten')",
-            (etf_symbol, holding_symbol, rank),
-        )
+        add_holding(conn, fund_symbol, holding_symbol, rank=rank, source="seed_top_ten")
     conn.commit()
 
 
@@ -299,7 +286,7 @@ def test_universe_coverage_partitions_total_funds_exactly(tmp_path: Path) -> Non
     conn = connect(tmp_path / "atlas.db")
     _add_weighted_holdings(conn, "WEIGHTED", [("A", 10.0)])
     _add_seed_holdings(conn, "SEEDONLY", ["B"])
-    conn.execute("INSERT INTO etf (symbol, description) VALUES ('BARE', 'no holdings fund')")
+    add_fund(conn, "BARE", "no holdings fund")
     conn.commit()
 
     coverage = universe_coverage(conn)
@@ -329,7 +316,7 @@ def test_universe_coverage_empty_universe(tmp_path: Path) -> None:
 def test_universe_coverage_fund_with_only_holdings_file_rows_is_weighted_not_membership(
     tmp_path: Path,
 ) -> None:
-    """A fund whose only etf_holding rows are source='holdings_file' must not
+    """A fund whose only fund_holding rows are source='holdings_file' must not
     also be double-counted as membership-only."""
     conn = connect(tmp_path / "atlas.db")
     _add_weighted_holdings(conn, "WEIGHTED", [("A", 10.0), ("B", 20.0)])
@@ -388,7 +375,7 @@ def test_weights_summing_under_100_still_leave_a_real_remainder(tmp_path: Path) 
 
 
 def test_a_symbol_held_in_both_sources_is_not_double_counted(tmp_path: Path) -> None:
-    """`etf_holding` keys on `source`, so one company can hold two rows per fund.
+    """`fund_holding` keys on `source`, so one company can hold two rows per fund.
 
     Look-through reads only `source = 'holdings_file'` rows, because only those
     carry a weight. The seed membership row for the same company must add
@@ -403,7 +390,7 @@ def test_a_symbol_held_in_both_sources_is_not_double_counted(tmp_path: Path) -> 
 
     assert (
         conn.execute(
-            "SELECT COUNT(*) AS c FROM etf_holding WHERE etf_symbol = 'XYZ' AND holding_symbol = 'AAA'"
+            "SELECT COUNT(*) AS c FROM fund_holding WHERE fund_symbol = 'XYZ' AND holding_symbol = 'AAA'"
         ).fetchone()["c"]
         == 2
     )

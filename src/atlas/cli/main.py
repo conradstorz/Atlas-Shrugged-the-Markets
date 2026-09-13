@@ -193,17 +193,26 @@ def import_holdings(
     conn = connect(db)
     symbol = symbol.strip().upper()
     # Checked before `load_fund_holdings` runs, which is what would insert the
-    # minimal `etf` row for an unfamiliar symbol — after that call this lookup
+    # minimal `fund` row for an unfamiliar symbol — after that call this lookup
     # would always find one and the warning could never fire.
     # Test for a *seed-derived* row, not merely any row. `load_fund_holdings`
-    # creates a bare `etf` row (source NULL) for an unknown symbol, so checking
+    # creates a bare `fund` row (source NULL) for an unknown symbol, so checking
     # for existence alone would warn on the first typo'd import and stay silent
     # on every one after it — leaving the phantom to fade quietly into the
     # universe, which is the failure this warning exists to prevent.
     seed_derived = conn.execute(
-        "SELECT 1 FROM etf WHERE symbol = ? AND source IS NOT NULL", (symbol,)
+        "SELECT 1 FROM fund WHERE symbol = ? AND source IS NOT NULL", (symbol,)
     ).fetchone()
-    if seed_derived is None:
+    # A company-typed symbol is about to be refused by `load_fund_holdings`
+    # below -- it names a holding of other funds, not a fund of its own -- so
+    # no fund will be created no matter what this warning says. Printing it
+    # anyway reads as a contradiction: "creating the fund" immediately
+    # followed by a refusal that no fund was created. Let the refusal's own
+    # message carry the explanation instead.
+    is_company = conn.execute(
+        "SELECT 1 FROM asset WHERE symbol = ? AND asset_type = 'company'", (symbol,)
+    ).fetchone()
+    if seed_derived is None and is_company is None:
         console.print(
             f"[yellow]Warning: {symbol} is not in the seed universe.\n"
             "  Importing anyway and creating the fund.\n"
@@ -221,8 +230,8 @@ def import_holdings(
         console.print(f"Imported 0 holdings for {symbol}. No usable rows were found in {holdings_csv}.")
         return
     total_weight = conn.execute(
-        "SELECT COALESCE(SUM(weight), 0) AS total FROM etf_holding "
-        "WHERE etf_symbol = ? AND source = 'holdings_file'",
+        "SELECT COALESCE(SUM(weight), 0) AS total FROM fund_holding "
+        "WHERE fund_symbol = ? AND source = 'holdings_file'",
         (symbol,),
     ).fetchone()["total"]
     console.print(f"Imported {count} holdings for {symbol} ({total_weight:.2f}% of fund by weight).")
@@ -235,7 +244,7 @@ def forget_fund_command(
 ) -> None:
     """Remove a fund and everything derived from it, undoing a typo'd `import-holdings`.
 
-    Deletes the symbol's `etf_holding`, `etf_score` and `etf` rows. Never
+    Deletes the symbol's `fund_holding`, `fund_score` and `fund` rows. Never
     touches `portfolio_position`: those are the investor's actual holdings and
     are not derived from the universe, so if the symbol still has a position
     this command says so rather than pretending the symbol is gone entirely.

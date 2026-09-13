@@ -19,6 +19,7 @@ from atlas.scoring.engine import (
     read_scores,
     score_all,
 )
+from db_fixtures import add_fund, add_holding
 
 SEED = Path("data/atlas_seed_universe.csv")
 
@@ -55,16 +56,13 @@ def _add_etf(
     it_exposure: str = "",
 ) -> None:
     """Insert a fund, optionally with unweighted seed select-list top-ten rows."""
-    conn.execute(
-        "INSERT INTO etf (symbol, description, category, gross_expense_ratio, "
-        "information_technology_exposure) VALUES (?, ?, ?, ?, ?)",
-        (symbol, description, "", expense, it_exposure),
+    add_fund(
+        conn, symbol, description,
+        category="", gross_expense_ratio=expense,
+        information_technology_exposure=it_exposure,
     )
     for rank, holding in enumerate(seed_holdings or [], start=1):
-        conn.execute(
-            "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank) VALUES (?, ?, ?)",
-            (symbol, holding, rank),
-        )
+        add_holding(conn, symbol, holding, rank=rank)
     conn.commit()
 
 
@@ -73,11 +71,11 @@ def _add_holdings_file(
 ) -> None:
     """Attach ``holdings_count`` imported rows sharing ``total_weight`` percent."""
     weight = total_weight / holdings_count
-    conn.executemany(
-        "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, weight, source) "
-        "VALUES (?, ?, ?, ?, 'holdings_file')",
-        [(symbol, f"{symbol}H{index:05d}", index, weight) for index in range(1, holdings_count + 1)],
-    )
+    for index in range(1, holdings_count + 1):
+        add_holding(
+            conn, symbol, f"{symbol}H{index:05d}",
+            rank=index, weight=weight, source="holdings_file",
+        )
     conn.commit()
 
 
@@ -337,16 +335,9 @@ def test_itot_and_vti_without_any_evidence_are_both_unscored(tmp_path: Path) -> 
 
 def _import_partial_holdings(conn: sqlite3.Connection, symbol: str) -> None:
     """Give `symbol` an imported file whose weights cover far too little."""
-    conn.execute(
-        "INSERT INTO etf (symbol, description) VALUES (?, ?) ON CONFLICT(symbol) DO NOTHING",
-        (symbol, f"{symbol} test fund"),
-    )
+    add_fund(conn, symbol, f"{symbol} test fund")
     for rank, (holding, weight) in enumerate([("AAA", 20.0), ("BBB", 15.0)], start=1):
-        conn.execute(
-            "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, weight, source) "
-            "VALUES (?, ?, ?, ?, 'holdings_file')",
-            (symbol, holding, rank, weight),
-        )
+        add_holding(conn, symbol, holding, rank=rank, weight=weight, source="holdings_file")
     conn.commit()
 
 

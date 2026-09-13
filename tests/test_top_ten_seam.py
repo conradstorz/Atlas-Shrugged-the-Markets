@@ -1,6 +1,6 @@
 """Tests for the top-ten seam: consumers that mean "top ten", not "all rows".
 
-``etf_holding`` holds two very different kinds of row: seed select-list rows
+``fund_holding`` holds two very different kinds of row: seed select-list rows
 (membership only, ``weight IS NULL``) and imported holdings-file rows (real
 weights, and potentially hundreds of them per fund). Every consumer whose
 output is *defined* as a top-ten — overlap, repeated holdings, the web fund
@@ -29,6 +29,7 @@ from atlas.analytics.overlap import (
 )
 from atlas.db.database import connect, load_fund_holdings, load_seed_universe
 from atlas.scoring.engine import score_all
+from db_fixtures import add_fund, add_holding
 
 SEED = Path("data/atlas_seed_universe.csv")
 
@@ -69,7 +70,7 @@ def _full_holdings(top_ten: list[str], tail_prefix: str) -> list[tuple[str, floa
     return rows
 
 def _add_fund(conn: sqlite3.Connection, symbol: str) -> None:
-    conn.execute("INSERT INTO etf (symbol, description) VALUES (?, ?)", (symbol, f"{symbol} test fund"))
+    add_fund(conn, symbol, f"{symbol} test fund")
     conn.commit()
 
 
@@ -77,11 +78,7 @@ def _add_seed_fund(conn: sqlite3.Connection, symbol: str, holdings: list[str]) -
     """Insert a fund whose only holdings are unweighted seed select-list rows."""
     _add_fund(conn, symbol)
     for rank, holding in enumerate(holdings, start=1):
-        conn.execute(
-            "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, source) "
-            "VALUES (?, ?, ?, 'seed_top_ten')",
-            (symbol, holding, rank),
-        )
+        add_holding(conn, symbol, holding, rank=rank, source="seed_top_ten")
     conn.commit()
 
 
@@ -338,7 +335,7 @@ def test_partial_import_overlapping_the_seed_list_leaves_it_whole(tmp_path: Path
 
     A partial export of a fund's *largest* names names exactly the symbols the
     seed top ten is made of. Under the old
-    ``PRIMARY KEY (etf_symbol, holding_symbol)`` those three imported rows took
+    ``PRIMARY KEY (fund_symbol, holding_symbol)`` those three imported rows took
     three seed slots, and SCHB's top ten came back seven names long — a short
     file shrinking a fund's top ten, which is the defect. ``source`` is now part
     of the key, so the two kinds of row coexist and the seed list survives at
@@ -359,7 +356,7 @@ def test_partial_import_overlapping_the_seed_list_leaves_it_whole(tmp_path: Path
     counts = {
         row["source"]: row["c"]
         for row in conn.execute(
-            "SELECT source, COUNT(*) AS c FROM etf_holding WHERE etf_symbol = 'SCHB' GROUP BY source"
+            "SELECT source, COUNT(*) AS c FROM fund_holding WHERE fund_symbol = 'SCHB' GROUP BY source"
         )
     }
     assert counts == {"seed_top_ten": 10, "holdings_file": 3}
@@ -386,15 +383,15 @@ def test_a_full_import_supersedes_without_consuming_the_seed_rows(tmp_path: Path
     assert holdings_weight_source(conn, "SCHB") == "holdings_file"
 
     seed_rows = conn.execute(
-        "SELECT holding_symbol, weight FROM etf_holding "
-        "WHERE etf_symbol = 'SCHB' AND source = 'seed_top_ten' ORDER BY rank"
+        "SELECT holding_symbol, weight FROM fund_holding "
+        "WHERE fund_symbol = 'SCHB' AND source = 'seed_top_ten' ORDER BY rank"
     ).fetchall()
     assert [row["holding_symbol"] for row in seed_rows] == SCHB_SEED_TOP_TEN
     assert all(row["weight"] is None for row in seed_rows)
 
 
 def test_unrecognized_source_rows_are_a_last_resort(tmp_path: Path) -> None:
-    """`etf_holding.source` has no CHECK constraint, so the rule must not trip on one.
+    """`fund_holding.source` has no CHECK constraint, so the rule must not trip on one.
 
     A row written by a future source type — or by hand — is used only when the
     fund has nothing the rule recognizes, and never mixed into a top ten drawn
@@ -402,20 +399,13 @@ def test_unrecognized_source_rows_are_a_last_resort(tmp_path: Path) -> None:
     """
     conn = connect(tmp_path / "atlas.db")
     _add_fund(conn, "ODD")
-    conn.execute(
-        "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, source) "
-        "VALUES ('ODD', 'HANDX', 1, 'hand_edited')"
-    )
+    add_holding(conn, "ODD", "HANDX", rank=1, source="hand_edited")
     conn.commit()
     assert top_ten_holdings(conn, "ODD") == ["HANDX"]
     assert holdings_weight_source(conn, "ODD") == "hand_edited"
 
     for rank, holding in enumerate(["S01", "S02"], start=1):
-        conn.execute(
-            "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, source) "
-            "VALUES ('ODD', ?, ?, 'seed_top_ten')",
-            (holding, rank),
-        )
+        add_holding(conn, "ODD", holding, rank=rank, source="seed_top_ten")
     conn.commit()
 
     assert top_ten_holdings(conn, "ODD") == ["S01", "S02"]

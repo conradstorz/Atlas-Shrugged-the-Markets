@@ -15,7 +15,7 @@ def test_dashboard_loads() -> None:
     assert "Maps, not predictions" in response.text
 
 
-def test_etf_scores_page_loads() -> None:
+def test_scores_page_loads() -> None:
     client = TestClient(app)
     response = client.get("/etfs?limit=5")
     assert response.status_code == 200

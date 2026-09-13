@@ -8,6 +8,7 @@ from atlas.db.database import connect, load_fund_holdings
 from atlas.exceptions import AtlasDataError
 from atlas.providers.base import FundHolding
 from atlas.providers.holdings_file import HoldingsFileProvider
+from db_fixtures import add_fund, add_holding
 
 ISHARES = Path("tests/fixtures/holdings_ishares.csv")
 SCHWAB = Path("tests/fixtures/holdings_schwab.csv")
@@ -124,15 +125,15 @@ def test_over_100_guard_raises_atlas_data_error(tmp_path: Path) -> None:
 
 def test_load_fund_holdings_stores_rows_ranked_by_descending_weight(tmp_path: Path) -> None:
     conn = connect(tmp_path / "atlas.db")
-    conn.execute("INSERT INTO etf (symbol, description) VALUES ('SCHB', 'Schwab US Broad Market ETF')")
+    add_fund(conn, "SCHB", "Schwab US Broad Market ETF")
     conn.commit()
 
     count = load_fund_holdings(conn, "SCHB", SCHWAB)
     assert count == 4  # AAPL, MSFT, AMZN, GOOG (distinct, after dedup)
 
     rows = conn.execute(
-        "SELECT holding_symbol, weight, source, rank FROM etf_holding "
-        "WHERE etf_symbol = 'SCHB' ORDER BY rank"
+        "SELECT holding_symbol, weight, source, rank FROM fund_holding "
+        "WHERE fund_symbol = 'SCHB' ORDER BY rank"
     ).fetchall()
     assert [r["holding_symbol"] for r in rows] == ["AAPL", "MSFT", "AMZN", "GOOG"]
     assert [r["rank"] for r in rows] == [1, 2, 3, 4]
@@ -146,7 +147,7 @@ def test_load_fund_holdings_reimport_replaces_not_accumulates(tmp_path: Path) ->
     count = load_fund_holdings(conn, "SCHB", SCHWAB)
     assert count == 4
     total_rows = conn.execute(
-        "SELECT COUNT(*) AS c FROM etf_holding WHERE etf_symbol = 'SCHB'"
+        "SELECT COUNT(*) AS c FROM fund_holding WHERE fund_symbol = 'SCHB'"
     ).fetchone()["c"]
     assert total_rows == 4
 
@@ -154,12 +155,12 @@ def test_load_fund_holdings_reimport_replaces_not_accumulates(tmp_path: Path) ->
 def test_load_fund_holdings_creates_missing_etf_row(tmp_path: Path) -> None:
     conn = connect(tmp_path / "atlas.db")
     # SCHB does not exist in the etf table yet.
-    assert conn.execute("SELECT 1 FROM etf WHERE symbol = 'SCHB'").fetchone() is None
+    assert conn.execute("SELECT 1 FROM fund WHERE symbol = 'SCHB'").fetchone() is None
 
     count = load_fund_holdings(conn, "SCHB", SCHWAB)
     assert count == 4
 
-    etf_row = conn.execute("SELECT symbol, description FROM etf WHERE symbol = 'SCHB'").fetchone()
+    etf_row = conn.execute("SELECT symbol, description FROM fund WHERE symbol = 'SCHB'").fetchone()
     assert etf_row is not None
     assert etf_row["description"] == ""
 
@@ -167,18 +168,11 @@ def test_load_fund_holdings_creates_missing_etf_row(tmp_path: Path) -> None:
 # --- imports are non-destructive: seed rows survive -----------------------
 
 
-def _add_seed_top_ten(conn, etf_symbol: str, symbols: list[str]) -> None:
+def _add_seed_top_ten(conn, fund_symbol: str, symbols: list[str]) -> None:
     """Give a fund a seed select-list top ten (membership only, no weights)."""
-    conn.execute(
-        "INSERT INTO etf (symbol, description) VALUES (?, ?) ON CONFLICT(symbol) DO NOTHING",
-        (etf_symbol, ""),
-    )
+    add_fund(conn, fund_symbol)
     for rank, symbol in enumerate(symbols, start=1):
-        conn.execute(
-            "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, source) "
-            "VALUES (?, ?, ?, 'seed_top_ten')",
-            (etf_symbol, symbol, rank),
-        )
+        add_holding(conn, fund_symbol, symbol, rank=rank, source="seed_top_ten")
     conn.commit()
 
 
@@ -192,15 +186,15 @@ def test_import_leaves_seed_rows_intact(tmp_path: Path) -> None:
     seed_symbols = [
         row["holding_symbol"]
         for row in conn.execute(
-            "SELECT holding_symbol FROM etf_holding "
-            "WHERE etf_symbol = 'SCHB' AND source = 'seed_top_ten' ORDER BY rank"
+            "SELECT holding_symbol FROM fund_holding "
+            "WHERE fund_symbol = 'SCHB' AND source = 'seed_top_ten' ORDER BY rank"
         )
     ]
     assert seed_symbols == [f"S{index:02d}" for index in range(1, 11)]
     assert all(
         row["weight"] is None
         for row in conn.execute(
-            "SELECT weight FROM etf_holding WHERE etf_symbol = 'SCHB' AND source = 'seed_top_ten'"
+            "SELECT weight FROM fund_holding WHERE fund_symbol = 'SCHB' AND source = 'seed_top_ten'"
         )
     )
 
@@ -215,14 +209,14 @@ def test_reimport_replaces_only_the_imported_rows(tmp_path: Path) -> None:
     counts = {
         row["source"]: row["c"]
         for row in conn.execute(
-            "SELECT source, COUNT(*) AS c FROM etf_holding WHERE etf_symbol = 'SCHB' GROUP BY source"
+            "SELECT source, COUNT(*) AS c FROM fund_holding WHERE fund_symbol = 'SCHB' GROUP BY source"
         )
     }
     assert counts == {"seed_top_ten": 10, "holdings_file": 4}
 
 
 def test_import_coexists_with_a_colliding_seed_row(tmp_path: Path) -> None:
-    """`etf_holding` is keyed by (fund, symbol, source): both rows survive.
+    """`fund_holding` is keyed by (fund, symbol, source): both rows survive.
 
     Membership in the fund's published top ten and the fund's real weight for
     that company are two different pieces of evidence about the same name, and
@@ -236,16 +230,16 @@ def test_import_coexists_with_a_colliding_seed_row(tmp_path: Path) -> None:
     load_fund_holdings(conn, "SCHB", SCHWAB)
 
     aapl = conn.execute(
-        "SELECT weight, source FROM etf_holding "
-        "WHERE etf_symbol = 'SCHB' AND holding_symbol = 'AAPL' ORDER BY source"
+        "SELECT weight, source FROM fund_holding "
+        "WHERE fund_symbol = 'SCHB' AND holding_symbol = 'AAPL' ORDER BY source"
     ).fetchall()
     assert [row["source"] for row in aapl] == ["holdings_file", "seed_top_ten"]
     assert aapl[0]["weight"] == pytest.approx(7.03)
     assert aapl[1]["weight"] is None
     # The seed-only name is untouched and gained no imported twin.
     other = conn.execute(
-        "SELECT weight, source FROM etf_holding "
-        "WHERE etf_symbol = 'SCHB' AND holding_symbol = 'OTHER'"
+        "SELECT weight, source FROM fund_holding "
+        "WHERE fund_symbol = 'SCHB' AND holding_symbol = 'OTHER'"
     ).fetchall()
     assert len(other) == 1
     assert other[0]["source"] == "seed_top_ten"
