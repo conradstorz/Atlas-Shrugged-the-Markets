@@ -379,7 +379,7 @@ def test_no_seed_fund_without_a_ratio_still_reports_a_cost_score(tmp_path: Path)
     load_seed_universe(conn, SEED)
     ratios = {
         row["symbol"]: (row["gross_expense_ratio"] or "").strip()
-        for row in conn.execute("SELECT symbol, gross_expense_ratio FROM etf")
+        for row in conn.execute("SELECT symbol, gross_expense_ratio FROM fund")
     }
 
     scored_without_a_ratio = [

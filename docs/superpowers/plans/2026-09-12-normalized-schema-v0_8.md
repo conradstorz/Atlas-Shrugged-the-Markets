@@ -36,7 +36,7 @@ Mechanical refactor so the flag-day in Task 2 touches one helper module instead 
 
 **Interfaces:**
 - Produces (used by every later task's tests):
-  - `add_fund(conn, symbol, description="", *, fund_type=None, category=None, select_list=None, gross_expense_ratio=None, information_technology_exposure=None, source="seed") -> None`
+  - `add_fund(conn, symbol, description="", *, fund_type=None, category=None, select_list=None, gross_expense_ratio=None, information_technology_exposure=None, source=None) -> None`
   - `add_holding(conn, fund_symbol, holding_symbol, *, holding_name=None, rank=1, weight=None, source="seed_top_ten") -> None` — must also satisfy any FK the holding needs (none in the old schema; Task 2 makes it create stub rows)
   - `add_score(conn, symbol, *, role="Satellite", overall_score=None, ai_score=4, resilience_score=None, cost_score=None, diversification_score=None, explanation="test") -> None`
 - Consumes: nothing.
@@ -64,7 +64,7 @@ def add_fund(
     select_list: str | None = None,
     gross_expense_ratio: str | None = None,
     information_technology_exposure: str | None = None,
-    source: str | None = "seed",
+    source: str | None = None,  # None matches what raw fixture INSERTs left in the column
 ) -> None:
     conn.execute(
         """
@@ -790,7 +790,7 @@ coverage total (line ~223):
 ```python
 def add_fund(conn, symbol, description="", *, fund_type=None, category=None,
              select_list=None, gross_expense_ratio=None,
-             information_technology_exposure=None, source="seed"):
+             information_technology_exposure=None, source=None):
     conn.execute(
         "INSERT INTO asset (symbol, name, asset_type) VALUES (?, ?, 'fund') "
         "ON CONFLICT(symbol) DO UPDATE SET name=excluded.name",

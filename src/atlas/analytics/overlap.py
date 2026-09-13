@@ -17,7 +17,7 @@ FULL_COVERAGE_THRESHOLD = 90.0
 
 # THE top-ten rule, expressed once.
 #
-# `etf_holding` mixes two kinds of row: seed select-list rows (membership only,
+# `fund_holding` mixes two kinds of row: seed select-list rows (membership only,
 # `weight IS NULL`, at most ten per fund) and imported holdings-file rows (real
 # weights, possibly hundreds per fund). Since imports stopped deleting seed
 # rows, one fund can carry both — and since `source` joined the primary key,
@@ -51,14 +51,14 @@ FULL_COVERAGE_THRESHOLD = 90.0
 # only universe-wide aggregates need the CTE directly.
 TOP_TEN_CTE = f"""
 WITH atlas_file_coverage AS (
-    SELECT etf_symbol, COALESCE(SUM(weight), 0.0) AS file_weight_total
-    FROM etf_holding
+    SELECT fund_symbol, COALESCE(SUM(weight), 0.0) AS file_weight_total
+    FROM fund_holding
     WHERE source = 'holdings_file'
-    GROUP BY etf_symbol
+    GROUP BY fund_symbol
 ),
 atlas_holding_basis AS (
     SELECT
-        h.etf_symbol,
+        h.fund_symbol,
         h.holding_symbol,
         h.weight,
         h.source,
@@ -70,24 +70,24 @@ atlas_holding_basis AS (
             WHEN h.source = 'holdings_file' THEN 2
             ELSE 3
         END AS basis_rank
-    FROM etf_holding h
-    LEFT JOIN atlas_file_coverage c ON c.etf_symbol = h.etf_symbol
+    FROM fund_holding h
+    LEFT JOIN atlas_file_coverage c ON c.fund_symbol = h.fund_symbol
 ),
 atlas_chosen_basis AS (
-    SELECT etf_symbol, MIN(basis_rank) AS basis_rank
+    SELECT fund_symbol, MIN(basis_rank) AS basis_rank
     FROM atlas_holding_basis
-    GROUP BY etf_symbol
+    GROUP BY fund_symbol
 ),
 atlas_top_ten AS (
-    SELECT etf_symbol, holding_symbol, weight, source, top_rank
+    SELECT fund_symbol, holding_symbol, weight, source, top_rank
     FROM (
         SELECT
-            b.etf_symbol,
+            b.fund_symbol,
             b.holding_symbol,
             b.weight,
             b.source,
             ROW_NUMBER() OVER (
-                PARTITION BY b.etf_symbol
+                PARTITION BY b.fund_symbol
                 ORDER BY
                     COALESCE(b.weight, 0) DESC,
                     b.rank,
@@ -95,7 +95,7 @@ atlas_top_ten AS (
             ) AS top_rank
         FROM atlas_holding_basis b
         JOIN atlas_chosen_basis c
-          ON c.etf_symbol = b.etf_symbol AND c.basis_rank = b.basis_rank
+          ON c.fund_symbol = b.fund_symbol AND c.basis_rank = b.basis_rank
     )
     WHERE top_rank <= {TOP_TEN_LIMIT}
 )
@@ -113,7 +113,7 @@ def holdings_basis_label(source: str | None) -> str:
 
     ``None`` means the fund has no holdings rows at all. An unrecognized
     source is reported by name rather than folded into "no holdings":
-    ``etf_holding.source`` carries no CHECK constraint, so a future source
+    ``fund_holding.source`` carries no CHECK constraint, so a future source
     type or a hand-edited row would otherwise be labelled as having no
     holdings while plainly having some.
     """
@@ -160,7 +160,7 @@ def top_ten_holdings(conn: sqlite3.Connection, etf_symbol: str) -> list[str]:
     of it.
     """
     rows = conn.execute(
-        TOP_TEN_CTE + "SELECT holding_symbol FROM atlas_top_ten WHERE etf_symbol = ? ORDER BY top_rank",
+        TOP_TEN_CTE + "SELECT holding_symbol FROM atlas_top_ten WHERE fund_symbol = ? ORDER BY top_rank",
         (etf_symbol.upper(),),
     ).fetchall()
     return [row["holding_symbol"] for row in rows]
@@ -179,7 +179,7 @@ def holdings_weight_source(conn: sqlite3.Connection, etf_symbol: str) -> str | N
     own coverage (see ``atlas.scoring.engine.measured_diversification``).
     """
     row = conn.execute(
-        TOP_TEN_CTE + "SELECT source FROM atlas_top_ten WHERE etf_symbol = ? ORDER BY top_rank LIMIT 1",
+        TOP_TEN_CTE + "SELECT source FROM atlas_top_ten WHERE fund_symbol = ? ORDER BY top_rank LIMIT 1",
         (etf_symbol.upper(),),
     ).fetchone()
     return row["source"] if row else None
@@ -228,7 +228,7 @@ def top_repeated_holdings(conn: sqlite3.Connection, limit: int = 20) -> list[sql
     return conn.execute(
         TOP_TEN_CTE
         + """
-        SELECT holding_symbol, COUNT(*) AS etf_count, GROUP_CONCAT(etf_symbol, ', ') AS etfs
+        SELECT holding_symbol, COUNT(*) AS etf_count, GROUP_CONCAT(fund_symbol, ', ') AS etfs
         FROM atlas_top_ten
         GROUP BY holding_symbol
         HAVING COUNT(*) > 1

@@ -56,7 +56,7 @@ class FundCoverage:
     """How much of a fund position's value Atlas can actually see through.
 
     ``has_weights`` is true only when the fund has real weighted holdings
-    (``etf_holding.source = 'holdings_file'``); a seed-only top-ten list is
+    (``fund_holding.source = 'holdings_file'``); a seed-only top-ten list is
     membership without weights and is never enough to model a fund.
     """
 
@@ -92,16 +92,16 @@ def _empty_report() -> ConcentrationReport:
 
 @dataclass(frozen=True)
 class UniverseCoverage:
-    """How much of the entire ``etf`` universe Atlas can see through.
+    """How much of the entire ``fund`` universe Atlas can see through.
 
-    Every fund in ``etf`` falls into exactly one of three buckets, so the
+    Every fund in ``fund`` falls into exactly one of three buckets, so the
     three subcategories always sum to ``total_funds``:
 
-    - ``weighted_funds``: has at least one ``etf_holding`` row with
+    - ``weighted_funds``: has at least one ``fund_holding`` row with
       ``source = 'holdings_file'`` (real weights, from ``atlas import-holdings``).
-    - ``membership_only_funds``: has ``etf_holding`` rows, but none of them
+    - ``membership_only_funds``: has ``fund_holding`` rows, but none of them
       are weighted — a seed top-ten membership list only.
-    - ``no_holdings_funds``: has no ``etf_holding`` rows at all.
+    - ``no_holdings_funds``: has no ``fund_holding`` rows at all.
     """
 
     total_funds: int
@@ -111,21 +111,21 @@ class UniverseCoverage:
 
 
 def universe_coverage(conn: sqlite3.Connection) -> UniverseCoverage:
-    """Partition every fund in the ``etf`` table by how much Atlas can model it.
+    """Partition every fund in the ``fund`` table by how much Atlas can model it.
 
     This is a universe-wide count, independent of any portfolio: it answers
     "how much of what Atlas knows about is actually weighted" rather than
     "how much of my money is modeled" (that is ``fund_coverage`` on a
     ``ConcentrationReport``).
     """
-    total_funds = int(conn.execute("SELECT COUNT(*) AS c FROM etf").fetchone()["c"])
+    total_funds = int(conn.execute("SELECT COUNT(*) AS c FROM fund").fetchone()["c"])
     weighted_funds = int(
         conn.execute(
             """
-            SELECT COUNT(*) AS c FROM etf e
+            SELECT COUNT(*) AS c FROM fund f
             WHERE EXISTS (
-                SELECT 1 FROM etf_holding h
-                WHERE h.etf_symbol = e.symbol AND h.source = 'holdings_file'
+                SELECT 1 FROM fund_holding h
+                WHERE h.fund_symbol = f.symbol AND h.source = 'holdings_file'
             )
             """
         ).fetchone()["c"]
@@ -133,11 +133,11 @@ def universe_coverage(conn: sqlite3.Connection) -> UniverseCoverage:
     membership_only_funds = int(
         conn.execute(
             """
-            SELECT COUNT(*) AS c FROM etf e
-            WHERE EXISTS (SELECT 1 FROM etf_holding h WHERE h.etf_symbol = e.symbol)
+            SELECT COUNT(*) AS c FROM fund f
+            WHERE EXISTS (SELECT 1 FROM fund_holding h WHERE h.fund_symbol = f.symbol)
               AND NOT EXISTS (
-                  SELECT 1 FROM etf_holding h
-                  WHERE h.etf_symbol = e.symbol AND h.source = 'holdings_file'
+                  SELECT 1 FROM fund_holding h
+                  WHERE h.fund_symbol = f.symbol AND h.source = 'holdings_file'
               )
             """
         ).fetchone()["c"]
@@ -145,8 +145,8 @@ def universe_coverage(conn: sqlite3.Connection) -> UniverseCoverage:
     no_holdings_funds = int(
         conn.execute(
             """
-            SELECT COUNT(*) AS c FROM etf e
-            WHERE NOT EXISTS (SELECT 1 FROM etf_holding h WHERE h.etf_symbol = e.symbol)
+            SELECT COUNT(*) AS c FROM fund f
+            WHERE NOT EXISTS (SELECT 1 FROM fund_holding h WHERE h.fund_symbol = f.symbol)
             """
         ).fetchone()["c"]
     )
@@ -165,7 +165,7 @@ def combined_concentration(
 
     Direct ``equity`` positions contribute their full market value; that math
     is exact. ``etf`` and ``mutual_fund`` positions look through to their
-    ``etf_holding`` rows: where a fund has real weighted holdings
+    ``fund_holding`` rows: where a fund has real weighted holdings
     (``source = 'holdings_file'``), each holding receives
     ``market_value * weight / 100`` and the fund's modeled share is
     ``SUM(weight) / 100``. Any remainder — including the entire value of a
@@ -226,8 +226,8 @@ def combined_concentration(
         fund_symbol = fund["symbol"]
         fund_value = float(fund["market_value"])
         weighted_holdings = conn.execute(
-            "SELECT holding_symbol, weight FROM etf_holding "
-            "WHERE etf_symbol = ? AND source = 'holdings_file' AND weight IS NOT NULL",
+            "SELECT holding_symbol, weight FROM fund_holding "
+            "WHERE fund_symbol = ? AND source = 'holdings_file' AND weight IS NOT NULL",
             (fund_symbol,),
         ).fetchall()
 

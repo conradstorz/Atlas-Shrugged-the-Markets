@@ -1,54 +1,57 @@
-CREATE TABLE IF NOT EXISTS etf (
-    symbol TEXT PRIMARY KEY,
-    description TEXT NOT NULL,
-    fund_type TEXT,
-    category TEXT,
-    select_list TEXT,
-    top_ten_holdings TEXT,
-    gross_expense_ratio TEXT,
-    information_technology_exposure TEXT,
-    source TEXT
+CREATE TABLE IF NOT EXISTS asset (
+    symbol      TEXT PRIMARY KEY,
+    name        TEXT,                          -- NULL allowed for stub rows created by holdings import
+    asset_type  TEXT NOT NULL CHECK (asset_type IN ('fund', 'company'))
 );
 
-CREATE TABLE IF NOT EXISTS etf_holding (
-    etf_symbol TEXT NOT NULL REFERENCES etf(symbol),
-    holding_symbol TEXT NOT NULL,
-    holding_name TEXT,
-    rank INTEGER NOT NULL,
-    weight REAL, -- percent of fund, e.g. 6.83 means 6.83%; NULL for seed select-list rows (symbols only)
-    source TEXT NOT NULL DEFAULT 'seed_top_ten',
+CREATE TABLE IF NOT EXISTS fund (
+    symbol                  TEXT PRIMARY KEY REFERENCES asset(symbol),
+    description             TEXT NOT NULL,
+    fund_type               TEXT,
+    category                TEXT,
+    select_list             TEXT,
+    gross_expense_ratio     TEXT,
+    information_technology_exposure TEXT,
+    source                  TEXT               -- NULL = stub created by import-holdings; the CLI phantom-fund warning keys off this
+);
+
+CREATE TABLE IF NOT EXISTS company (
+    symbol  TEXT PRIMARY KEY REFERENCES asset(symbol)
+    -- no attributes yet; exists so v0.9 themes/sector have an anchor
+);
+
+CREATE TABLE IF NOT EXISTS theme (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL UNIQUE,
+    description TEXT
+    -- empty in v0.8; v0.9 fills it and adds theme_link
+);
+
+CREATE TABLE IF NOT EXISTS fund_holding (
+    fund_symbol     TEXT NOT NULL REFERENCES fund(symbol),
+    holding_symbol  TEXT NOT NULL REFERENCES asset(symbol),
+    holding_name    TEXT,
+    rank            INTEGER NOT NULL,
+    weight          REAL, -- percent of fund, e.g. 6.83 means 6.83%; NULL for seed select-list rows (symbols only)
+    source          TEXT NOT NULL DEFAULT 'seed_top_ten',
     -- `source` is part of the key so a fund's seed select-list membership row
     -- and its imported holdings-file row for the SAME company can coexist.
-    -- With the narrower (etf_symbol, holding_symbol) key, importing a partial
-    -- issuer export of a fund's largest names overwrote exactly the seed rows
-    -- that mattered and shrank the fund's top ten. Which of the two sources a
-    -- fund's top ten is read from is decided by
+    -- Which of the two sources a fund's top ten is read from is decided by
     -- `atlas.analytics.overlap.TOP_TEN_CTE`, not by the storage key.
-    PRIMARY KEY (etf_symbol, holding_symbol, source)
+    PRIMARY KEY (fund_symbol, holding_symbol, source)
 );
 
-CREATE TABLE IF NOT EXISTS etf_score (
-    symbol TEXT PRIMARY KEY REFERENCES etf(symbol),
+CREATE TABLE IF NOT EXISTS fund_score (
+    symbol TEXT PRIMARY KEY REFERENCES fund(symbol),
     -- `role` and `ai_score` are keyword heuristics over the fund's description,
     -- so they are always available and stay NOT NULL. Every other score is
     -- nullable, and NULL always means the same thing: not measured, therefore
     -- excluded from overall_score rather than substituted with a stand-in.
-    -- 0 is a real score meaning "as bad as this component gets", never a
-    -- sentinel for missing data.
     role TEXT NOT NULL,
-    -- NULL means no data-grounded component could be measured for this fund
-    -- at all, leaving only the AI keyword heuristic, so no overall score was
-    -- produced. A number built from a base of 20 plus one keyword heuristic
-    -- would look like a measurement and be a guess.
     overall_score INTEGER,
     ai_score INTEGER NOT NULL,
-    -- NULL: no information-technology exposure on file, so the role-based
-    -- resilience baseline could not be eroded by real data.
     resilience_score INTEGER,
-    -- NULL: no gross expense ratio on file.
     cost_score INTEGER,
-    -- NULL: no imported holdings file covering essentially the whole fund, so
-    -- the fund's breadth is unknown.
     diversification_score INTEGER,
     explanation TEXT NOT NULL
 );

@@ -21,8 +21,13 @@ def add_fund(
     source: str | None = None,  # None matches what the raw fixture INSERTs left in the column
 ) -> None:
     conn.execute(
+        "INSERT INTO asset (symbol, name, asset_type) VALUES (?, ?, 'fund') "
+        "ON CONFLICT(symbol) DO UPDATE SET name=excluded.name",
+        (symbol, description),
+    )
+    conn.execute(
         """
-        INSERT INTO etf (
+        INSERT INTO fund (
             symbol, description, fund_type, category, select_list,
             gross_expense_ratio, information_technology_exposure, source
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -50,10 +55,32 @@ def add_holding(
     weight: float | None = None,
     source: str = "seed_top_ten",
 ) -> None:
+    # Satisfy both FKs: the fund must exist, and the held symbol must be an
+    # asset (company stub unless already registered).
+    conn.execute(
+        "INSERT INTO asset (symbol, name, asset_type) VALUES (?, '', 'fund') "
+        "ON CONFLICT(symbol) DO NOTHING",
+        (fund_symbol,),
+    )
+    conn.execute(
+        "INSERT INTO fund (symbol, description) VALUES (?, '') "
+        "ON CONFLICT(symbol) DO NOTHING",
+        (fund_symbol,),
+    )
+    conn.execute(
+        "INSERT INTO asset (symbol, name, asset_type) VALUES (?, ?, 'company') "
+        "ON CONFLICT(symbol) DO NOTHING",
+        (holding_symbol, holding_name),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO company (symbol) "
+        "SELECT symbol FROM asset WHERE symbol = ? AND asset_type = 'company'",
+        (holding_symbol,),
+    )
     conn.execute(
         """
-        INSERT INTO etf_holding (
-            etf_symbol, holding_symbol, holding_name, rank, weight, source
+        INSERT INTO fund_holding (
+            fund_symbol, holding_symbol, holding_name, rank, weight, source
         ) VALUES (?, ?, ?, ?, ?, ?)
         """,
         (fund_symbol, holding_symbol, holding_name, rank, weight, source),
@@ -73,8 +100,18 @@ def add_score(
     explanation: str = "test",
 ) -> None:
     conn.execute(
+        "INSERT INTO asset (symbol, name, asset_type) VALUES (?, '', 'fund') "
+        "ON CONFLICT(symbol) DO NOTHING",
+        (symbol,),
+    )
+    conn.execute(
+        "INSERT INTO fund (symbol, description) VALUES (?, '') "
+        "ON CONFLICT(symbol) DO NOTHING",
+        (symbol,),
+    )
+    conn.execute(
         """
-        INSERT INTO etf_score (
+        INSERT INTO fund_score (
             symbol, role, overall_score, ai_score, resilience_score,
             cost_score, diversification_score, explanation
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)

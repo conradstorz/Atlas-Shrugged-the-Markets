@@ -15,7 +15,7 @@ def _split_seed_holdings(raw: str | None) -> list[str]:
 
 
 class SeedUniverseProvider(ResearchDataProvider):
-    """Parses the uploaded ETF Select List CSV that seeds the ``etf`` table.
+    """Parses the uploaded ETF Select List CSV that seeds the ``fund`` table.
 
     Each row carries fund metadata plus a pipe-delimited top-ten holdings
     cell (e.g. ``|NVDA||AAPL|``); this provider parses that cell into a list
@@ -33,15 +33,15 @@ class SeedUniverseProvider(ResearchDataProvider):
     def iter_funds(self) -> Iterable[Mapping[str, object]]:
         """Yield one mapping per seed CSV row with a non-blank ``Symbol``.
 
-        Keys match the ``etf`` table column names (``symbol``,
+        Keys match the ``fund`` table column names (``symbol``,
         ``description``, ``fund_type``, ``category``, ``select_list``,
-        ``top_ten_holdings``, ``gross_expense_ratio``,
-        ``information_technology_exposure``, ``source``) so the loader can
-        bind them straight into its upsert. ``top_ten_holdings`` stays the
-        raw cell text, since that is what is stored verbatim in ``etf``; the
-        parsed symbols are carried separately under ``holding_symbols``,
-        which is not an ``etf`` column but mirrors what the loader inserts
-        into ``etf_holding``.
+        ``gross_expense_ratio``, ``information_technology_exposure``,
+        ``source``) so the loader can bind them straight into its upsert, plus
+        two that are not ``fund`` columns: ``top_ten_holdings``, the raw cell
+        text, and ``holding_symbols``, the symbols parsed out of it — which is
+        what the loader inserts into ``fund_holding``. The raw cell is still
+        yielded because it is the provider's unparsed input, not because
+        anything stores it.
         """
         with self.path.open("r", encoding="utf-8-sig", newline="") as csv_file:
             reader = csv.DictReader(csv_file)

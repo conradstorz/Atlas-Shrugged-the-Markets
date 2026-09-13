@@ -95,8 +95,8 @@ def measured_diversification(
     row = conn.execute(
         """
         SELECT COUNT(*) AS holdings_count, COALESCE(SUM(weight), 0.0) AS weight_total
-        FROM etf_holding
-        WHERE etf_symbol = ? AND source = 'holdings_file'
+        FROM fund_holding
+        WHERE fund_symbol = ? AND source = 'holdings_file'
         """,
         (symbol,),
     ).fetchone()
@@ -341,7 +341,7 @@ def _explain(
 def read_scores(conn: sqlite3.Connection) -> list[ScoreBreakdown]:
     """Return previously persisted ETF scores without recomputing them.
 
-    Reads the ``etf_score`` table (populated by :func:`score_all`) so read-only
+    Reads the ``fund_score`` table (populated by :func:`score_all`) so read-only
     callers such as the web dashboard don't have to re-score and re-write on
     every request. Every NULL is passed through as ``None`` rather than
     defaulted: an unmeasured component, or — for ``overall_score`` — a fund
@@ -356,7 +356,7 @@ def read_scores(conn: sqlite3.Connection) -> list[ScoreBreakdown]:
         """
         SELECT symbol, role, overall_score, ai_score, resilience_score,
                cost_score, diversification_score, explanation
-        FROM etf_score
+        FROM fund_score
         ORDER BY overall_score IS NULL, overall_score DESC, symbol
         """
     ).fetchall()
@@ -376,13 +376,13 @@ def read_scores(conn: sqlite3.Connection) -> list[ScoreBreakdown]:
 
 
 def score_all(conn: sqlite3.Connection) -> list[ScoreBreakdown]:
-    """Score every fund in ``etf``, persist the results, and rank them.
+    """Score every fund in ``fund``, persist the results, and rank them.
 
     Returns the scores ranked best-first, with funds that could not be scored
     at all last. ``None`` components and a ``None`` ``overall_score`` are
-    written to ``etf_score`` as SQL NULL, which is what those columns mean.
+    written to ``fund_score`` as SQL NULL, which is what those columns mean.
     """
-    rows = conn.execute("SELECT * FROM etf ORDER BY symbol").fetchall()
+    rows = conn.execute("SELECT * FROM fund ORDER BY symbol").fetchall()
     scores = [
         score_etf(row, diversification=measured_diversification(conn, row["symbol"]))
         for row in rows
@@ -390,7 +390,7 @@ def score_all(conn: sqlite3.Connection) -> list[ScoreBreakdown]:
     for score in scores:
         conn.execute(
             """
-            INSERT INTO etf_score (
+            INSERT INTO fund_score (
                 symbol, role, overall_score, ai_score, resilience_score,
                 cost_score, diversification_score, explanation
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)

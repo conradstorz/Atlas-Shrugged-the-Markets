@@ -38,18 +38,18 @@ def test_forget_fund_removes_holding_and_score_rows_and_leaves_other_funds(tmp_p
     conn = connect(tmp_path / "atlas.db")
     load_fund_holdings(conn, "SHCB", SCHWAB)
     add_fund(conn, "OTHER")
-    score_all(conn)  # populates etf_score for both SHCB and OTHER
+    score_all(conn)  # populates fund_score for both SHCB and OTHER
 
     result = forget_fund(conn, "SHCB")
 
     assert result.holdings_removed == 4  # AAPL, MSFT, AMZN, GOOG
     assert result.score_removed is True
-    assert conn.execute("SELECT 1 FROM etf WHERE symbol = 'SHCB'").fetchone() is None
-    assert conn.execute("SELECT 1 FROM etf_holding WHERE etf_symbol = 'SHCB'").fetchone() is None
-    assert conn.execute("SELECT 1 FROM etf_score WHERE symbol = 'SHCB'").fetchone() is None
+    assert conn.execute("SELECT 1 FROM fund WHERE symbol = 'SHCB'").fetchone() is None
+    assert conn.execute("SELECT 1 FROM fund_holding WHERE fund_symbol = 'SHCB'").fetchone() is None
+    assert conn.execute("SELECT 1 FROM fund_score WHERE symbol = 'SHCB'").fetchone() is None
     # OTHER is untouched.
-    assert conn.execute("SELECT 1 FROM etf WHERE symbol = 'OTHER'").fetchone() is not None
-    assert conn.execute("SELECT 1 FROM etf_score WHERE symbol = 'OTHER'").fetchone() is not None
+    assert conn.execute("SELECT 1 FROM fund WHERE symbol = 'OTHER'").fetchone() is not None
+    assert conn.execute("SELECT 1 FROM fund_score WHERE symbol = 'OTHER'").fetchone() is not None
 
 
 def test_forget_fund_leaves_portfolio_position_intact(tmp_path: Path) -> None:
@@ -72,7 +72,7 @@ def test_forget_fund_leaves_portfolio_position_intact(tmp_path: Path) -> None:
     assert position is not None
     assert position["market_value"] == 50000
     # The fund itself is still gone.
-    assert conn.execute("SELECT 1 FROM etf WHERE symbol = 'SHCB'").fetchone() is None
+    assert conn.execute("SELECT 1 FROM fund WHERE symbol = 'SHCB'").fetchone() is None
 
 
 def test_forget_fund_unknown_symbol_raises_atlas_data_error(tmp_path: Path) -> None:
@@ -112,7 +112,7 @@ def test_import_holdings_unknown_symbol_prints_warning_and_still_imports(tmp_pat
 
     conn = connect(db_path)
     rows = conn.execute(
-        "SELECT COUNT(*) AS c FROM etf_holding WHERE etf_symbol = 'SHCB'"
+        "SELECT COUNT(*) AS c FROM fund_holding WHERE fund_symbol = 'SHCB'"
     ).fetchone()["c"]
     assert rows == 4
 
@@ -178,18 +178,18 @@ def test_round_trip_phantom_import_and_forget_restores_universe_count(tmp_path: 
     runner.invoke(cli_app, ["import-seed", "--seed", str(SEED), "--db", str(db_path)])
 
     conn = connect(db_path)
-    baseline = conn.execute("SELECT COUNT(*) AS c FROM etf").fetchone()["c"]
+    baseline = conn.execute("SELECT COUNT(*) AS c FROM fund").fetchone()["c"]
 
     runner.invoke(cli_app, ["import-holdings", "SHCB", str(SCHWAB), "--db", str(db_path)])
     conn = connect(db_path)
-    after_phantom = conn.execute("SELECT COUNT(*) AS c FROM etf").fetchone()["c"]
+    after_phantom = conn.execute("SELECT COUNT(*) AS c FROM fund").fetchone()["c"]
     assert after_phantom == baseline + 1
 
     result = runner.invoke(cli_app, ["forget-fund", "SHCB", "--db", str(db_path)])
     assert result.exit_code == 0
 
     conn = connect(db_path)
-    after_forget = conn.execute("SELECT COUNT(*) AS c FROM etf").fetchone()["c"]
+    after_forget = conn.execute("SELECT COUNT(*) AS c FROM fund").fetchone()["c"]
     assert after_forget == baseline
 
 

@@ -1,6 +1,6 @@
 """Tests for the top-ten seam: consumers that mean "top ten", not "all rows".
 
-``etf_holding`` holds two very different kinds of row: seed select-list rows
+``fund_holding`` holds two very different kinds of row: seed select-list rows
 (membership only, ``weight IS NULL``) and imported holdings-file rows (real
 weights, and potentially hundreds of them per fund). Every consumer whose
 output is *defined* as a top-ten — overlap, repeated holdings, the web fund
@@ -335,7 +335,7 @@ def test_partial_import_overlapping_the_seed_list_leaves_it_whole(tmp_path: Path
 
     A partial export of a fund's *largest* names names exactly the symbols the
     seed top ten is made of. Under the old
-    ``PRIMARY KEY (etf_symbol, holding_symbol)`` those three imported rows took
+    ``PRIMARY KEY (fund_symbol, holding_symbol)`` those three imported rows took
     three seed slots, and SCHB's top ten came back seven names long — a short
     file shrinking a fund's top ten, which is the defect. ``source`` is now part
     of the key, so the two kinds of row coexist and the seed list survives at
@@ -356,7 +356,7 @@ def test_partial_import_overlapping_the_seed_list_leaves_it_whole(tmp_path: Path
     counts = {
         row["source"]: row["c"]
         for row in conn.execute(
-            "SELECT source, COUNT(*) AS c FROM etf_holding WHERE etf_symbol = 'SCHB' GROUP BY source"
+            "SELECT source, COUNT(*) AS c FROM fund_holding WHERE fund_symbol = 'SCHB' GROUP BY source"
         )
     }
     assert counts == {"seed_top_ten": 10, "holdings_file": 3}
@@ -383,15 +383,15 @@ def test_a_full_import_supersedes_without_consuming_the_seed_rows(tmp_path: Path
     assert holdings_weight_source(conn, "SCHB") == "holdings_file"
 
     seed_rows = conn.execute(
-        "SELECT holding_symbol, weight FROM etf_holding "
-        "WHERE etf_symbol = 'SCHB' AND source = 'seed_top_ten' ORDER BY rank"
+        "SELECT holding_symbol, weight FROM fund_holding "
+        "WHERE fund_symbol = 'SCHB' AND source = 'seed_top_ten' ORDER BY rank"
     ).fetchall()
     assert [row["holding_symbol"] for row in seed_rows] == SCHB_SEED_TOP_TEN
     assert all(row["weight"] is None for row in seed_rows)
 
 
 def test_unrecognized_source_rows_are_a_last_resort(tmp_path: Path) -> None:
-    """`etf_holding.source` has no CHECK constraint, so the rule must not trip on one.
+    """`fund_holding.source` has no CHECK constraint, so the rule must not trip on one.
 
     A row written by a future source type — or by hand — is used only when the
     fund has nothing the rule recognizes, and never mixed into a top ten drawn

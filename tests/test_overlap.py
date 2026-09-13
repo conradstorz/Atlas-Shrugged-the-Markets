@@ -20,9 +20,9 @@ def _seed_universe(conn) -> None:
         "BBB": ["X", "Z"],
         "CCC": ["Q"],
     }
-    for etf_symbol, symbols in holdings.items():
+    for fund_symbol, symbols in holdings.items():
         for rank, holding in enumerate(symbols, start=1):
-            add_holding(conn, etf_symbol, holding, rank=rank)
+            add_holding(conn, fund_symbol, holding, rank=rank)
     conn.commit()
 
 
@@ -86,11 +86,11 @@ def test_repeated_holdings_only_returns_holdings_in_more_than_one_etf(tmp_path: 
     assert set(rows[0]["etfs"].split(", ")) == {"AAA", "BBB"}
 
 
-def _add_weighted(conn, etf_symbol: str, holdings: list[tuple]) -> None:
+def _add_weighted(conn, fund_symbol: str, holdings: list[tuple]) -> None:
     """holdings: (holding_symbol, weight_percent), stored as source='holdings_file'."""
-    add_fund(conn, etf_symbol, f"{etf_symbol} test fund")
+    add_fund(conn, fund_symbol, f"{fund_symbol} test fund")
     for rank, (holding, weight) in enumerate(holdings, start=1):
-        add_holding(conn, etf_symbol, holding, rank=rank, weight=weight, source="holdings_file")
+        add_holding(conn, fund_symbol, holding, rank=rank, weight=weight, source="holdings_file")
     conn.commit()
 
 
@@ -133,7 +133,7 @@ def test_overlap_basis_is_none_for_a_fund_with_no_holdings(tmp_path: Path) -> No
 def test_basis_label_distinguishes_no_holdings_from_an_unknown_source() -> None:
     """An unrecognized source must not read as "no holdings".
 
-    `etf_holding.source` has no CHECK constraint, so a future source type or a
+    `fund_holding.source` has no CHECK constraint, so a future source type or a
     hand-edited row is possible. Labelling it "no holdings" would assert
     something false about a fund that plainly has holdings.
     """
