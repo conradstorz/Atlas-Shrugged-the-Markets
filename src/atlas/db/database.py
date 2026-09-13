@@ -338,6 +338,20 @@ def forget_fund(conn: sqlite3.Connection, symbol: str) -> ForgetFundResult:
         "AND symbol NOT IN (SELECT holding_symbol FROM fund_holding) "
         "AND symbol NOT IN (SELECT symbol FROM fund)"
     )
+    # An asset can also be left with NO subtype row at all: forgetting a fund
+    # that was itself held by another fund (this function's own asset delete
+    # above, three statements up, spares it while a fund_holding row still
+    # names it) leaves an asset_type='fund' row with no `fund` row of its own.
+    # If that surviving fund_holding reference is later removed too -- e.g. the
+    # fund holding it is forgotten next -- neither sweep above catches it: they
+    # only look at asset_type='company' rows. Sweep any asset row that is
+    # anchored by nothing at all: no company row, no fund row, and no
+    # fund_holding reference, regardless of its asset_type.
+    conn.execute(
+        "DELETE FROM asset WHERE symbol NOT IN (SELECT symbol FROM company) "
+        "AND symbol NOT IN (SELECT symbol FROM fund) "
+        "AND symbol NOT IN (SELECT holding_symbol FROM fund_holding)"
+    )
     portfolio_positions = int(
         conn.execute(
             "SELECT COUNT(*) AS c FROM portfolio_position WHERE symbol = ?", (symbol,)

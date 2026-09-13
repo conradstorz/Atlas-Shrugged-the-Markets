@@ -4,6 +4,7 @@ import pytest
 
 from atlas.db.database import connect, forget_fund, load_fund_holdings, load_seed_universe
 from atlas.exceptions import AtlasDataError
+from db_fixtures import add_fund, add_holding
 
 SEED_HEADER = (
     "Symbol,Description,Fund Type,ETF Select List® Category,ETF Select List,"
@@ -62,6 +63,31 @@ def test_import_holdings_for_company_symbol_refuses(tmp_path):
     assert conn.execute(
         "SELECT COUNT(*) FROM fund_holding WHERE fund_symbol='NVDA'"
     ).fetchone()[0] == 0
+
+
+def test_add_fund_fixture_promotes_a_symbol_already_added_as_a_holding(tmp_path):
+    """`add_fund` must mirror `load_seed_universe`'s promotion, not fake a dead state.
+
+    `add_holding("F", "X")` registers X as a company stub. `add_fund` used to
+    upsert only `name` on conflict, leaving `asset_type='company'` while also
+    inserting a `fund` row for X -- a symbol with both a `company` row and a
+    `fund` row simultaneously, which production code can never produce:
+    `load_seed_universe` promotes (deletes the `company` row) and
+    `load_fund_holdings` refuses outright. A fixture that builds this state
+    lets tests pass against behavior no real import path can reach.
+    """
+    conn = connect(tmp_path / "atlas.db")
+    add_holding(conn, "F", "X")
+    add_fund(conn, "X")
+    conn.commit()
+
+    assert conn.execute("SELECT asset_type FROM asset WHERE symbol = 'X'").fetchone()[0] == "fund"
+    assert conn.execute("SELECT 1 FROM company WHERE symbol = 'X'").fetchone() is None
+    assert conn.execute("SELECT 1 FROM fund WHERE symbol = 'X'").fetchone() is not None
+    # The holding row naming X survives the promotion.
+    assert conn.execute(
+        "SELECT 1 FROM fund_holding WHERE fund_symbol = 'F' AND holding_symbol = 'X'"
+    ).fetchone() is not None
 
 
 def test_forget_fund_removes_orphaned_company_stubs(tmp_path):

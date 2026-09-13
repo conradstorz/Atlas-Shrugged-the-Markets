@@ -22,9 +22,16 @@ def add_fund(
 ) -> None:
     conn.execute(
         "INSERT INTO asset (symbol, name, asset_type) VALUES (?, ?, 'fund') "
-        "ON CONFLICT(symbol) DO UPDATE SET name=excluded.name",
+        "ON CONFLICT(symbol) DO UPDATE SET name=excluded.name, asset_type='fund'",
         (symbol, description),
     )
+    # Mirror load_seed_universe's promotion: a symbol already registered as a
+    # company stub (from being named as some fund's holding) must lose its
+    # company row when it turns out to be a fund. Without this, add_fund could
+    # build a symbol with BOTH a company row and a fund row at once -- a state
+    # no production import path can reach (load_seed_universe promotes;
+    # load_fund_holdings refuses to import holdings for a company-typed symbol).
+    conn.execute("DELETE FROM company WHERE symbol = ?", (symbol,))
     conn.execute(
         """
         INSERT INTO fund (

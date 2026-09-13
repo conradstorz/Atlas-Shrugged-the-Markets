@@ -31,6 +31,15 @@ SCHWAB = Path("tests/fixtures/holdings_schwab.csv")
 runner = CliRunner()
 
 
+def write_holdings_csv_for(tmp_path: Path, name: str, *rows: tuple[str, str, float]) -> Path:
+    """(ticker, holding_name, weight_percent) rows in an issuer-file shape."""
+    path = tmp_path / name
+    lines = ["Ticker,Name,Weight\n"]
+    lines += [f"{ticker},{holding_name},{weight}\n" for ticker, holding_name, weight in rows]
+    path.write_text("".join(lines), encoding="utf-8")
+    return path
+
+
 # --- db.database.forget_fund -------------------------------------------------
 
 
@@ -105,6 +114,50 @@ def test_forget_fund_dual_registered_symbol_with_nothing_else_holding_it(tmp_pat
     assert conn.execute("SELECT 1 FROM asset WHERE symbol = 'DUAL'").fetchone() is None
     assert conn.execute("SELECT 1 FROM company WHERE symbol = 'DUAL'").fetchone() is None
     assert conn.execute("SELECT 1 FROM fund WHERE symbol = 'DUAL'").fetchone() is None
+
+
+def test_forget_fund_gcs_a_fund_typed_asset_left_with_no_subtype_row(tmp_path: Path) -> None:
+    """A fund-holding-a-fund case must not leak a bare `asset` row forever.
+
+    TARGETX is itself a fund (holdings were imported for it) and is also held
+    by FUNDX. Forgetting TARGETX first rightly leaves its `asset` row behind
+    (FUNDX's `fund_holding` row still references it) with `asset_type='fund'`,
+    no `fund` row, and no `company` row -- an asset with no subtype at all.
+    Forgetting FUNDX next removes the only remaining reference to TARGETX, so
+    that leftover `asset` row has nothing anchoring it any more. The GC sweeps
+    in `forget_fund` keyed only off `asset_type = 'company'` never touch it,
+    leaking it permanently.
+    """
+    conn = connect(tmp_path / "atlas.db")
+    targetx_csv = tmp_path / "targetx.csv"
+    targetx_csv.write_text("Ticker,Name,Weight\nZZZQ,Exclusive Co,4.0\n", encoding="utf-8")
+    load_fund_holdings(conn, "TARGETX", targetx_csv)
+
+    fundx_csv = tmp_path / "fundx.csv"
+    fundx_csv.write_text("Ticker,Name,Weight\nTARGETX,Target Fund,10.0\n", encoding="utf-8")
+    load_fund_holdings(conn, "FUNDX", fundx_csv)
+    conn.commit()
+
+    # Sanity: TARGETX is a real fund, held by FUNDX.
+    assert conn.execute("SELECT asset_type FROM asset WHERE symbol = 'TARGETX'").fetchone()[0] == "fund"
+    assert conn.execute(
+        "SELECT 1 FROM fund_holding WHERE fund_symbol = 'FUNDX' AND holding_symbol = 'TARGETX'"
+    ).fetchone()
+
+    forget_fund(conn, "TARGETX")
+
+    # TARGETX's asset row survives -- FUNDX's fund_holding row still needs it --
+    # but with no subtype row of its own any more.
+    row = conn.execute("SELECT asset_type FROM asset WHERE symbol = 'TARGETX'").fetchone()
+    assert row is not None
+    assert row["asset_type"] == "fund"
+    assert conn.execute("SELECT 1 FROM fund WHERE symbol = 'TARGETX'").fetchone() is None
+    assert conn.execute("SELECT 1 FROM company WHERE symbol = 'TARGETX'").fetchone() is None
+
+    forget_fund(conn, "FUNDX")
+
+    # Nothing references TARGETX any more; its orphaned asset row must be gone.
+    assert conn.execute("SELECT 1 FROM asset WHERE symbol = 'TARGETX'").fetchone() is None
 
 
 def test_forget_fund_dual_registered_symbol_still_held_by_another_fund(tmp_path: Path) -> None:
@@ -262,6 +315,39 @@ def test_the_warning_repeats_on_every_import_for_a_phantom_fund(tmp_path: Path) 
         result = runner.invoke(cli_app, ["import-holdings", "SHCB", str(holdings), "--db", str(db)])
         assert result.exit_code == 0, attempt
         assert "not in the seed universe" in result.output, f"no warning on the {attempt} import"
+
+
+def test_import_holdings_for_company_symbol_does_not_print_phantom_warning(tmp_path: Path) -> None:
+    """A company-typed symbol gets the refusal, not a contradictory phantom warning.
+
+    NVDA is a company stub (some other fund's holdings named it). Importing
+    holdings *for* NVDA is refused by `load_fund_holdings` -- it is a company,
+    not a fund -- but the CLI's "unfamiliar symbol" check ran first and looked
+    only at whether NVDA had a seed-derived `fund` row, which it never did,
+    so it printed "Importing anyway and creating the fund" immediately before
+    the refusal said no fund would be created. The warning must not fire for a
+    symbol the refusal is about to reject.
+    """
+    db_path = tmp_path / "atlas.db"
+    conn = connect(db_path)
+    load_fund_holdings(
+        conn, "SOMEFUND",
+        write_holdings_csv_for(tmp_path, "somefund.csv", ("NVDA", "NVIDIA Corp", 7.5)),
+    )  # NVDA -> company stub
+    conn.close()
+
+    result = runner.invoke(
+        cli_app,
+        ["import-holdings", "NVDA", str(write_holdings_csv_for(tmp_path, "nvda.csv", ("AAPL", "Apple Inc", 3.0))),
+         "--db", str(db_path)],
+    )
+    output = " ".join(result.output.split())
+
+    assert result.exit_code != 0
+    assert "Importing anyway and creating the fund" not in output
+    assert "Warning" not in output
+    assert "NVDA is registered as a company" in output
+    assert "Not importing a holdings file for it." in output
 
 
 def test_a_seed_fund_never_warns(tmp_path: Path) -> None:

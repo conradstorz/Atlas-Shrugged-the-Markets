@@ -203,7 +203,16 @@ def import_holdings(
     seed_derived = conn.execute(
         "SELECT 1 FROM fund WHERE symbol = ? AND source IS NOT NULL", (symbol,)
     ).fetchone()
-    if seed_derived is None:
+    # A company-typed symbol is about to be refused by `load_fund_holdings`
+    # below -- it names a holding of other funds, not a fund of its own -- so
+    # no fund will be created no matter what this warning says. Printing it
+    # anyway reads as a contradiction: "creating the fund" immediately
+    # followed by a refusal that no fund was created. Let the refusal's own
+    # message carry the explanation instead.
+    is_company = conn.execute(
+        "SELECT 1 FROM asset WHERE symbol = ? AND asset_type = 'company'", (symbol,)
+    ).fetchone()
+    if seed_derived is None and is_company is None:
         console.print(
             f"[yellow]Warning: {symbol} is not in the seed universe.\n"
             "  Importing anyway and creating the fund.\n"
