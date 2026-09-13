@@ -290,10 +290,11 @@ def forget_fund(conn: sqlite3.Connection, symbol: str) -> ForgetFundResult:
     # A symbol can be dual-registered today: a company stub (created because
     # some fund's holdings named it) that later had holdings imported for it,
     # gaining a fund row too, with asset_type left at 'company' throughout.
-    # company.symbol references asset(symbol), so it must be deleted before
-    # the asset row whenever the asset row is also going away — same
-    # condition as the asset delete below, checked here first because SQLite
-    # enforces the FK on this statement, not that one.
+    # company.symbol references asset(symbol), so the asset delete below
+    # would fail while this child row survives; it must go first whenever the
+    # asset row is also going away. Same condition as the asset delete: when
+    # the asset row survives (another fund still holds the symbol), it keeps
+    # asset_type='company', and the company row must stay as its subtype row.
     conn.execute(
         "DELETE FROM company WHERE symbol = ? "
         "AND NOT EXISTS (SELECT 1 FROM fund_holding WHERE holding_symbol = ?)",
