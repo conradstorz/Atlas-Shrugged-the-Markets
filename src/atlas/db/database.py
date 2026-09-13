@@ -257,7 +257,12 @@ def forget_fund(conn: sqlite3.Connection, symbol: str) -> ForgetFundResult:
     references `fund(symbol)` and `connect()` sets `PRAGMA foreign_keys = ON`;
     deleting `fund` first would violate that constraint. The `asset` row goes
     last, and only if no surviving `fund_holding` row still names the symbol as
-    a holding — that foreign key points at `asset(symbol)`.
+    a holding — that foreign key points at `asset(symbol)`. Immediately before
+    the `asset` delete, the symbol's `company` row (if any) is deleted under
+    the same condition: a symbol can be dual-registered, holding both a
+    `company` row (from being named as a holding) and a `fund` row (from
+    having holdings imported for it), and `company.symbol` also references
+    `asset(symbol)`.
 
     Never touches `portfolio_position`. Those rows are the investor's actual
     holdings, typed in or imported from a broker export, and Atlas cannot
@@ -282,6 +287,18 @@ def forget_fund(conn: sqlite3.Connection, symbol: str) -> ForgetFundResult:
         conn.execute("DELETE FROM fund_score WHERE symbol = ?", (symbol,)).rowcount > 0
     )
     conn.execute("DELETE FROM fund WHERE symbol = ?", (symbol,))
+    # A symbol can be dual-registered today: a company stub (created because
+    # some fund's holdings named it) that later had holdings imported for it,
+    # gaining a fund row too, with asset_type left at 'company' throughout.
+    # company.symbol references asset(symbol), so it must be deleted before
+    # the asset row whenever the asset row is also going away — same
+    # condition as the asset delete below, checked here first because SQLite
+    # enforces the FK on this statement, not that one.
+    conn.execute(
+        "DELETE FROM company WHERE symbol = ? "
+        "AND NOT EXISTS (SELECT 1 FROM fund_holding WHERE holding_symbol = ?)",
+        (symbol, symbol),
+    )
     # The fund's own asset row goes too — unless another fund still holds this
     # symbol, in which case the FK from fund_holding.holding_symbol needs it.
     conn.execute(

@@ -82,6 +82,59 @@ def test_forget_fund_unknown_symbol_raises_atlas_data_error(tmp_path: Path) -> N
     assert "NOPE" in str(excinfo.value)
 
 
+def test_forget_fund_dual_registered_symbol_with_nothing_else_holding_it(tmp_path: Path) -> None:
+    """A symbol can be dual-registered: a company stub that later gained a fund row.
+
+    This happens when some fund's holdings named the symbol first (creating an
+    `asset` row with `asset_type='company'` and a `company` row), and holdings
+    were later imported for that same symbol (creating a `fund` row for it,
+    without ever changing `asset_type`). `company.symbol` references
+    `asset(symbol)`, so deleting the `asset` row without first deleting the
+    `company` row raises `sqlite3.IntegrityError`. When nothing else holds the
+    symbol, the asset row is going away, so the company row must go with it.
+    """
+    conn = connect(tmp_path / "atlas.db")
+    conn.execute("INSERT INTO asset (symbol, name, asset_type) VALUES ('DUAL', 'Dual Co', 'company')")
+    conn.execute("INSERT INTO company (symbol) VALUES ('DUAL')")
+    conn.execute("INSERT INTO fund (symbol, description) VALUES ('DUAL', '')")
+    conn.commit()
+
+    result = forget_fund(conn, "DUAL")
+
+    assert result.symbol == "DUAL"
+    assert conn.execute("SELECT 1 FROM asset WHERE symbol = 'DUAL'").fetchone() is None
+    assert conn.execute("SELECT 1 FROM company WHERE symbol = 'DUAL'").fetchone() is None
+    assert conn.execute("SELECT 1 FROM fund WHERE symbol = 'DUAL'").fetchone() is None
+
+
+def test_forget_fund_dual_registered_symbol_still_held_by_another_fund(tmp_path: Path) -> None:
+    """Same dual-registered state, but another fund still holds the symbol.
+
+    The asset row must survive (the surviving `fund_holding` row still
+    references it), and the company row must survive with it — it anchors the
+    subtype invariant for the holding that remains. Only the `fund` row for
+    the forgotten symbol itself should go.
+    """
+    conn = connect(tmp_path / "atlas.db")
+    conn.execute("INSERT INTO asset (symbol, name, asset_type) VALUES ('DUAL', 'Dual Co', 'company')")
+    conn.execute("INSERT INTO company (symbol) VALUES ('DUAL')")
+    conn.execute("INSERT INTO fund (symbol, description) VALUES ('DUAL', '')")
+    conn.execute("INSERT INTO asset (symbol, name, asset_type) VALUES ('OTHER', 'Other Fund', 'fund')")
+    conn.execute("INSERT INTO fund (symbol, description) VALUES ('OTHER', '')")
+    conn.execute(
+        "INSERT INTO fund_holding (fund_symbol, holding_symbol, rank, source) "
+        "VALUES ('OTHER', 'DUAL', 1, 'seed_top_ten')"
+    )
+    conn.commit()
+
+    result = forget_fund(conn, "DUAL")
+
+    assert result.symbol == "DUAL"
+    assert conn.execute("SELECT 1 FROM asset WHERE symbol = 'DUAL'").fetchone() is not None
+    assert conn.execute("SELECT 1 FROM company WHERE symbol = 'DUAL'").fetchone() is not None
+    assert conn.execute("SELECT 1 FROM fund WHERE symbol = 'DUAL'").fetchone() is None
+
+
 # --- CLI: warning on import-holdings for an unfamiliar symbol ---------------
 
 
