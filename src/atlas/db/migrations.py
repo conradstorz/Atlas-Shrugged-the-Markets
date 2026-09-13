@@ -69,7 +69,11 @@ def _run_step(conn: sqlite3.Connection, target: int, step) -> None:
                 raise
             raise AtlasError(
                 f"Migration to schema version {target} failed and was rolled back; "
-                f"the database is unchanged: {exc}"
+                f"your data is unchanged: {exc}"
+                # "Your data", not "the database": the empty current-schema
+                # tables that connect()'s bootstrap created before this step
+                # remain, which is harmless — every row and the old tables
+                # are exactly as they were, and the next open retries cleanly.
             ) from exc
     finally:
         if foreign_keys_were_on:

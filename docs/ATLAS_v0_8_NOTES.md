@@ -105,7 +105,7 @@ not just under migration:
 - Providers' parsers (`providers/seed_universe.py`, `providers/portfolio_files.py`,
   `providers/holdings_file.py`).
 
-201 tests pass. Test fixtures for the universe tables now go through `tests/db_fixtures.py`
+204 tests pass. Test fixtures for the universe tables now go through `tests/db_fixtures.py`
 so a future schema change touches one helper module instead of every insert site.
 
 ## References
