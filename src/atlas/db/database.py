@@ -321,15 +321,22 @@ def forget_fund(conn: sqlite3.Connection, symbol: str) -> ForgetFundResult:
         "AND NOT EXISTS (SELECT 1 FROM fund_holding WHERE holding_symbol = ?)",
         (symbol, symbol),
     )
-    # Company stubs exist only as anchors for fund_holding rows. Any stub no
-    # fund holds any more is residue of the import being undone; sweep it.
+    # Company stubs exist only as anchors for fund_holding rows or fund rows.
+    # Any stub nothing references any more -- neither a fund_holding row nor
+    # a fund row of its own -- is residue of the import being undone; sweep
+    # it. The fund exclusion matters even here: a symbol elsewhere in the DB
+    # can be dual-registered (asset_type='company' plus its own fund row)
+    # with no fund_holding row naming it, and that fund row's FK to asset(symbol)
+    # would otherwise make the sweep below crash.
     conn.execute(
-        "DELETE FROM company WHERE symbol NOT IN (SELECT holding_symbol FROM fund_holding)"
+        "DELETE FROM company WHERE symbol NOT IN (SELECT holding_symbol FROM fund_holding) "
+        "AND symbol NOT IN (SELECT symbol FROM fund)"
     )
     conn.execute(
         "DELETE FROM asset WHERE asset_type = 'company' "
         "AND symbol NOT IN (SELECT symbol FROM company) "
-        "AND symbol NOT IN (SELECT holding_symbol FROM fund_holding)"
+        "AND symbol NOT IN (SELECT holding_symbol FROM fund_holding) "
+        "AND symbol NOT IN (SELECT symbol FROM fund)"
     )
     portfolio_positions = int(
         conn.execute(
