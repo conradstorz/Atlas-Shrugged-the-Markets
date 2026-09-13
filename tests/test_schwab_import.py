@@ -3,6 +3,7 @@ from pathlib import Path
 from atlas.db.database import connect
 from atlas.portfolio.analysis import combined_concentration
 from atlas.portfolio.schwab import load_schwab_positions
+from db_fixtures import add_fund, add_holding
 
 FIXTURE = Path("tests/fixtures/schwab_positions_sample.csv")
 MULTI_FIXTURE = Path("tests/fixtures/schwab_positions_multi_account.csv")
@@ -62,13 +63,9 @@ def test_schwab_import_feeds_combined_concentration(tmp_path: Path) -> None:
     conn = connect(tmp_path / "atlas.db")
     # Give SCHD real weighted holdings (KO 30%, PEP 20%; 50% of the fund
     # modeled) so it is partially looked through; FSELX has none at all.
-    conn.execute("INSERT INTO etf (symbol, description) VALUES ('SCHD', 'Schwab Dividend')")
+    add_fund(conn, "SCHD", "Schwab Dividend")
     for rank, (holding, weight) in enumerate([("KO", 30.0), ("PEP", 20.0)], start=1):
-        conn.execute(
-            "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, weight, source) "
-            "VALUES ('SCHD', ?, ?, ?, 'holdings_file')",
-            (holding, rank, weight),
-        )
+        add_holding(conn, "SCHD", holding, rank=rank, weight=weight, source="holdings_file")
     conn.commit()
 
     load_schwab_positions(conn, "Play", FIXTURE)

@@ -29,6 +29,7 @@ from atlas.db.database import connect, load_seed_universe
 from atlas.reports.markdown import build_research_report
 from atlas.scoring.engine import read_scores, score_all
 from atlas.scoring.model import format_component, score_sort_key
+from db_fixtures import add_fund, add_holding
 
 SEED = Path("data/atlas_seed_universe.csv")
 runner = CliRunner()
@@ -41,10 +42,10 @@ def _add_etf(
     expense: str = "",
     it_exposure: str = "",
 ) -> None:
-    conn.execute(
-        "INSERT INTO etf (symbol, description, category, gross_expense_ratio, "
-        "information_technology_exposure) VALUES (?, ?, '', ?, ?)",
-        (symbol, description, expense, it_exposure),
+    add_fund(
+        conn, symbol, description,
+        category="", gross_expense_ratio=expense,
+        information_technology_exposure=it_exposure,
     )
     conn.commit()
 
@@ -52,11 +53,8 @@ def _add_etf(
 def _add_holdings_file(conn: sqlite3.Connection, symbol: str, holdings_count: int) -> None:
     """Attach a full (100%-covering) imported holdings file of N names."""
     weight = 100.0 / holdings_count
-    conn.executemany(
-        "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, weight, source) "
-        "VALUES (?, ?, ?, ?, 'holdings_file')",
-        [(symbol, f"{symbol}H{i:05d}", i, weight) for i in range(1, holdings_count + 1)],
-    )
+    for i in range(1, holdings_count + 1):
+        add_holding(conn, symbol, f"{symbol}H{i:05d}", rank=i, weight=weight, source="holdings_file")
     conn.commit()
 
 

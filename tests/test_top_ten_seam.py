@@ -29,6 +29,7 @@ from atlas.analytics.overlap import (
 )
 from atlas.db.database import connect, load_fund_holdings, load_seed_universe
 from atlas.scoring.engine import score_all
+from db_fixtures import add_fund, add_holding
 
 SEED = Path("data/atlas_seed_universe.csv")
 
@@ -69,7 +70,7 @@ def _full_holdings(top_ten: list[str], tail_prefix: str) -> list[tuple[str, floa
     return rows
 
 def _add_fund(conn: sqlite3.Connection, symbol: str) -> None:
-    conn.execute("INSERT INTO etf (symbol, description) VALUES (?, ?)", (symbol, f"{symbol} test fund"))
+    add_fund(conn, symbol, f"{symbol} test fund")
     conn.commit()
 
 
@@ -77,11 +78,7 @@ def _add_seed_fund(conn: sqlite3.Connection, symbol: str, holdings: list[str]) -
     """Insert a fund whose only holdings are unweighted seed select-list rows."""
     _add_fund(conn, symbol)
     for rank, holding in enumerate(holdings, start=1):
-        conn.execute(
-            "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, source) "
-            "VALUES (?, ?, ?, 'seed_top_ten')",
-            (symbol, holding, rank),
-        )
+        add_holding(conn, symbol, holding, rank=rank, source="seed_top_ten")
     conn.commit()
 
 
@@ -402,20 +399,13 @@ def test_unrecognized_source_rows_are_a_last_resort(tmp_path: Path) -> None:
     """
     conn = connect(tmp_path / "atlas.db")
     _add_fund(conn, "ODD")
-    conn.execute(
-        "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, source) "
-        "VALUES ('ODD', 'HANDX', 1, 'hand_edited')"
-    )
+    add_holding(conn, "ODD", "HANDX", rank=1, source="hand_edited")
     conn.commit()
     assert top_ten_holdings(conn, "ODD") == ["HANDX"]
     assert holdings_weight_source(conn, "ODD") == "hand_edited"
 
     for rank, holding in enumerate(["S01", "S02"], start=1):
-        conn.execute(
-            "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, source) "
-            "VALUES ('ODD', ?, ?, 'seed_top_ten')",
-            (holding, rank),
-        )
+        add_holding(conn, "ODD", holding, rank=rank, source="seed_top_ten")
     conn.commit()
 
     assert top_ten_holdings(conn, "ODD") == ["S01", "S02"]

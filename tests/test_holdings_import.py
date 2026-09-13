@@ -8,6 +8,7 @@ from atlas.db.database import connect, load_fund_holdings
 from atlas.exceptions import AtlasDataError
 from atlas.providers.base import FundHolding
 from atlas.providers.holdings_file import HoldingsFileProvider
+from db_fixtures import add_fund, add_holding
 
 ISHARES = Path("tests/fixtures/holdings_ishares.csv")
 SCHWAB = Path("tests/fixtures/holdings_schwab.csv")
@@ -124,7 +125,7 @@ def test_over_100_guard_raises_atlas_data_error(tmp_path: Path) -> None:
 
 def test_load_fund_holdings_stores_rows_ranked_by_descending_weight(tmp_path: Path) -> None:
     conn = connect(tmp_path / "atlas.db")
-    conn.execute("INSERT INTO etf (symbol, description) VALUES ('SCHB', 'Schwab US Broad Market ETF')")
+    add_fund(conn, "SCHB", "Schwab US Broad Market ETF")
     conn.commit()
 
     count = load_fund_holdings(conn, "SCHB", SCHWAB)
@@ -169,16 +170,9 @@ def test_load_fund_holdings_creates_missing_etf_row(tmp_path: Path) -> None:
 
 def _add_seed_top_ten(conn, etf_symbol: str, symbols: list[str]) -> None:
     """Give a fund a seed select-list top ten (membership only, no weights)."""
-    conn.execute(
-        "INSERT INTO etf (symbol, description) VALUES (?, ?) ON CONFLICT(symbol) DO NOTHING",
-        (etf_symbol, ""),
-    )
+    add_fund(conn, etf_symbol)
     for rank, symbol in enumerate(symbols, start=1):
-        conn.execute(
-            "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, source) "
-            "VALUES (?, ?, ?, 'seed_top_ten')",
-            (etf_symbol, symbol, rank),
-        )
+        add_holding(conn, etf_symbol, symbol, rank=rank, source="seed_top_ten")
     conn.commit()
 
 

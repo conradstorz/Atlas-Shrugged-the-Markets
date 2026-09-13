@@ -8,15 +8,13 @@ from pathlib import Path
 
 from atlas.analytics.overlap import compare_etfs, holdings_basis_label, top_repeated_holdings
 from atlas.db.database import connect
+from db_fixtures import add_fund, add_holding
 
 
 def _seed_universe(conn) -> None:
     """AAA holds {X, Y}; BBB holds {X, Z}; CCC holds {Q}."""
     for symbol in ("AAA", "BBB", "CCC"):
-        conn.execute(
-            "INSERT INTO etf (symbol, description) VALUES (?, ?)",
-            (symbol, f"{symbol} test fund"),
-        )
+        add_fund(conn, symbol, f"{symbol} test fund")
     holdings = {
         "AAA": ["X", "Y"],
         "BBB": ["X", "Z"],
@@ -24,10 +22,7 @@ def _seed_universe(conn) -> None:
     }
     for etf_symbol, symbols in holdings.items():
         for rank, holding in enumerate(symbols, start=1):
-            conn.execute(
-                "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank) VALUES (?, ?, ?)",
-                (etf_symbol, holding, rank),
-            )
+            add_holding(conn, etf_symbol, holding, rank=rank)
     conn.commit()
 
 
@@ -93,16 +88,9 @@ def test_repeated_holdings_only_returns_holdings_in_more_than_one_etf(tmp_path: 
 
 def _add_weighted(conn, etf_symbol: str, holdings: list[tuple]) -> None:
     """holdings: (holding_symbol, weight_percent), stored as source='holdings_file'."""
-    conn.execute(
-        "INSERT INTO etf (symbol, description) VALUES (?, ?) ON CONFLICT(symbol) DO NOTHING",
-        (etf_symbol, f"{etf_symbol} test fund"),
-    )
+    add_fund(conn, etf_symbol, f"{etf_symbol} test fund")
     for rank, (holding, weight) in enumerate(holdings, start=1):
-        conn.execute(
-            "INSERT INTO etf_holding (etf_symbol, holding_symbol, rank, weight, source) "
-            "VALUES (?, ?, ?, ?, 'holdings_file')",
-            (etf_symbol, holding, rank, weight),
-        )
+        add_holding(conn, etf_symbol, holding, rank=rank, weight=weight, source="holdings_file")
     conn.commit()
 
 

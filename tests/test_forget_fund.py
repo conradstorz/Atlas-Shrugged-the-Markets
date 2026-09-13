@@ -24,6 +24,7 @@ from atlas.cli.main import app as cli_app
 from atlas.db.database import connect, forget_fund, load_fund_holdings
 from atlas.exceptions import AtlasDataError
 from atlas.scoring.engine import score_all
+from db_fixtures import add_fund
 
 SEED = Path("data/atlas_seed_universe.csv")
 SCHWAB = Path("tests/fixtures/holdings_schwab.csv")
@@ -36,7 +37,7 @@ runner = CliRunner()
 def test_forget_fund_removes_holding_and_score_rows_and_leaves_other_funds(tmp_path: Path) -> None:
     conn = connect(tmp_path / "atlas.db")
     load_fund_holdings(conn, "SHCB", SCHWAB)
-    conn.execute("INSERT INTO etf (symbol, description) VALUES ('OTHER', '')")
+    add_fund(conn, "OTHER")
     score_all(conn)  # populates etf_score for both SHCB and OTHER
 
     result = forget_fund(conn, "SHCB")
@@ -214,9 +215,7 @@ def test_a_seed_fund_never_warns(tmp_path: Path) -> None:
     """A symbol that came from the seed universe is not a phantom."""
     db = tmp_path / "atlas.db"
     conn = connect(db)
-    conn.execute(
-        "INSERT INTO etf (symbol, description, source) VALUES ('SCHB', 'Schwab', 'Uploaded ETF Select List')"
-    )
+    add_fund(conn, "SCHB", "Schwab", source="Uploaded ETF Select List")
     conn.commit()
     conn.close()
     holdings = tmp_path / "h.csv"

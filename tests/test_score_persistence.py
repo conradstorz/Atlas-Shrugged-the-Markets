@@ -5,6 +5,7 @@ from pathlib import Path
 
 from atlas.db.database import connect
 from atlas.scoring.engine import read_scores, score_all
+from db_fixtures import add_fund
 
 
 def _seed_two_etfs(conn: sqlite3.Connection) -> None:
@@ -14,25 +15,14 @@ def _seed_two_etfs(conn: sqlite3.Connection) -> None:
     NULL `overall_score` for both and these tests would only ever round-trip
     the sentinel values they write by hand.
     """
-    conn.execute(
-        "INSERT INTO etf (symbol, description, category, gross_expense_ratio) "
-        "VALUES (?, ?, ?, ?)",
-        ("AAA", "Total broad market fund", "Large Blend", "0.03%"),
-    )
-    conn.execute(
-        "INSERT INTO etf (symbol, description, category, gross_expense_ratio) "
-        "VALUES (?, ?, ?, ?)",
-        ("BBB", "Treasury bond fund", "Fixed Income", "0.05%"),
-    )
+    add_fund(conn, "AAA", "Total broad market fund", category="Large Blend", gross_expense_ratio="0.03%")
+    add_fund(conn, "BBB", "Treasury bond fund", category="Fixed Income", gross_expense_ratio="0.05%")
     conn.commit()
 
 
 def _seed_an_unscorable_etf(conn: sqlite3.Connection) -> None:
     """A fund with nothing measurable: `score_all` stores a NULL overall score."""
-    conn.execute(
-        "INSERT INTO etf (symbol, description, category) VALUES (?, ?, ?)",
-        ("ZZZ", "Total broad market fund", "Large Blend"),
-    )
+    add_fund(conn, "ZZZ", "Total broad market fund", category="Large Blend")
     conn.commit()
 
 
