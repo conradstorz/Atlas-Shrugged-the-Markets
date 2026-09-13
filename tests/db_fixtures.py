@@ -18,7 +18,7 @@ def add_fund(
     select_list: str | None = None,
     gross_expense_ratio: str | None = None,
     information_technology_exposure: str | None = None,
-    source: str | None = "seed",
+    source: str | None = None,  # None matches what the raw fixture INSERTs left in the column
 ) -> None:
     conn.execute(
         """
