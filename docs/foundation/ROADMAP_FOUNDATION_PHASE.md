@@ -16,7 +16,7 @@
 - Add coverage reporting at universe and portfolio level.
 - Implement provider interfaces.
 
-## v0.8 — Normalized Schema
+## v0.8 — Normalized Schema (delivered)
 
 - Add `asset`, `fund`, `company`, and `theme` tables.
 - Add migration from prototype `etf` table.
