@@ -53,10 +53,15 @@ def load_seed_universe(conn: sqlite3.Connection, seed_path: Path) -> int:
         conn.execute(
             """
             INSERT INTO asset (symbol, name, asset_type) VALUES (?, ?, 'fund')
-            ON CONFLICT(symbol) DO UPDATE SET name=excluded.name
+            ON CONFLICT(symbol) DO UPDATE SET name=excluded.name, asset_type='fund'
             """,
             (symbol, fund["description"]),
         )
+        # A symbol previously known only as some fund's holding was a company
+        # stub; the seed CSV saying it is a fund is better evidence. Promote:
+        # the company row goes, existing fund_holding rows that reference the
+        # symbol keep working because their FK targets asset, not company.
+        conn.execute("DELETE FROM company WHERE symbol = ?", (symbol,))
         conn.execute(
             """
             INSERT INTO fund (
@@ -191,6 +196,15 @@ def load_fund_holdings(conn: sqlite3.Connection, fund_symbol: str, path: Path) -
     symbol = fund_symbol.strip().upper()
     holdings = sorted(HoldingsFileProvider(path).iter_holdings(), key=lambda h: h.weight, reverse=True)
 
+    existing = conn.execute(
+        "SELECT asset_type FROM asset WHERE symbol = ?", (symbol,)
+    ).fetchone()
+    if existing is not None and existing["asset_type"] == "company":
+        raise AtlasDataError(
+            f"{symbol} is registered as a company (a holding of other funds), "
+            "not a fund. Not importing a holdings file for it."
+        )
+
     conn.execute(
         "INSERT INTO asset (symbol, name, asset_type) VALUES (?, '', 'fund') "
         "ON CONFLICT(symbol) DO NOTHING",
@@ -306,6 +320,16 @@ def forget_fund(conn: sqlite3.Connection, symbol: str) -> ForgetFundResult:
         "DELETE FROM asset WHERE symbol = ? "
         "AND NOT EXISTS (SELECT 1 FROM fund_holding WHERE holding_symbol = ?)",
         (symbol, symbol),
+    )
+    # Company stubs exist only as anchors for fund_holding rows. Any stub no
+    # fund holds any more is residue of the import being undone; sweep it.
+    conn.execute(
+        "DELETE FROM company WHERE symbol NOT IN (SELECT holding_symbol FROM fund_holding)"
+    )
+    conn.execute(
+        "DELETE FROM asset WHERE asset_type = 'company' "
+        "AND symbol NOT IN (SELECT symbol FROM company) "
+        "AND symbol NOT IN (SELECT holding_symbol FROM fund_holding)"
     )
     portfolio_positions = int(
         conn.execute(
